@@ -129,7 +129,7 @@ struct arm_dpm {
 	/* FIXME -- read/write DCSR methods and symbols */
 };
 
-int arm_dpm_setup(struct arm_dpm *dpm);
+int arm_dpm_setup(struct arm_dpm *dpm, int arch_mode);
 int arm_dpm_initialize(struct arm_dpm *dpm);
 
 int arm_dpm_read_current_registers(struct arm_dpm *);

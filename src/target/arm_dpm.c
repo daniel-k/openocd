@@ -936,11 +936,11 @@ void arm_dpm_report_dscr(struct arm_dpm *dpm, uint32_t dscr)
  *
  * Oh, and watchpoints.  Yeah.
  */
-int arm_dpm_setup(struct arm_dpm *dpm)
+int arm_dpm_setup(struct arm_dpm *dpm, int arch_mode)
 {
 	struct arm *arm = dpm->arm;
 	struct target *target = arm->target;
-	struct reg_cache *cache;
+	struct reg_cache *cache = 0;
 
 	arm->dpm = dpm;
 
@@ -949,11 +949,16 @@ int arm_dpm_setup(struct arm_dpm *dpm)
 	arm->read_core_reg = arm_dpm_read_core_reg;
 	arm->write_core_reg = arm_dpm_write_core_reg;
 
-	cache = arm_build_reg_cache(target, arm);
+	if (arch_mode == 64)
+		;
+		/* cache = armv8_build_reg_cache(target); */
+	else {
+		cache = arm_build_reg_cache(target, arm);
+		*register_get_last_cache_p(&target->reg_cache) = cache;
+	}
+
 	if (!cache)
 		return ERROR_FAIL;
-
-	*register_get_last_cache_p(&target->reg_cache) = cache;
 
 	/* coprocessor access setup */
 	arm->mrc = dpm_mrc;

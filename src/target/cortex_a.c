@@ -775,7 +775,7 @@ static int cortex_a_dpm_setup(struct cortex_a_common *a, uint32_t didr)
 	dpm->bpwp_enable = cortex_a_bpwp_enable;
 	dpm->bpwp_disable = cortex_a_bpwp_disable;
 
-	retval = arm_dpm_setup(dpm);
+	retval = arm_dpm_setup(dpm, 32);
 	if (retval == ERROR_OK)
 		retval = arm_dpm_initialize(dpm);
 
