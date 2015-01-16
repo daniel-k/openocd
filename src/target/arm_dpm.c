@@ -1045,10 +1045,10 @@ int arm_dpm_setup(struct arm_dpm *dpm, int arch_mode)
 	arm->read_core_reg = arm->read_core_reg ? : arm_dpm_read_core_reg;
 	arm->write_core_reg = arm->write_core_reg ? : arm_dpm_write_core_reg;
 
-	if (arch_mode == 64)
-		;
-		/* cache = armv8_build_reg_cache(target); */
-	else {
+	if (arch_mode == 64) {
+		cache = armv8_build_reg_cache(target);
+		target->reg_cache = cache;
+	} else {
 		cache = arm_build_reg_cache(target, arm);
 		*register_get_last_cache_p(&target->reg_cache) = cache;
 	}
