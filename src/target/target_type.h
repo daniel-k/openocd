@@ -115,6 +115,9 @@ struct target_type {
 	 */
 	int (*read_memory)(struct target *target, uint32_t address,
 			uint32_t size, uint32_t count, uint8_t *buffer);
+
+	int (*read_memory_64)(struct target *target, uint64_t address,
+			uint32_t size, uint32_t count, uint8_t *buffer);
 	/**
 	 * Target memory write callback.  Do @b not call this function
 	 * directly, use target_write_memory() instead.
@@ -124,6 +127,9 @@ struct target_type {
 
 	/* Default implementation will do some fancy alignment to improve performance, target can override */
 	int (*read_buffer)(struct target *target, uint32_t address,
+			uint32_t size, uint8_t *buffer);
+
+	int (*read_buffer_64)(struct target *target, uint64_t address,
 			uint32_t size, uint8_t *buffer);
 
 	/* Default implementation will do some fancy alignment to improve performance, target can override */
@@ -241,6 +247,8 @@ struct target_type {
 	int (*read_phys_memory)(struct target *target, uint32_t phys_address,
 			uint32_t size, uint32_t count, uint8_t *buffer);
 
+	int (*read_phys_memory_64)(struct target *target, uint64_t phys_address,
+			uint32_t size, uint32_t count, uint8_t *buffer);
 	/*
 	 * same as read_phys_memory, except that it writes...
 	 */

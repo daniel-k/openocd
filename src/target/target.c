@@ -62,6 +62,8 @@
 
 static int target_read_buffer_default(struct target *target, uint32_t address,
 		uint32_t count, uint8_t *buffer);
+static int target_read_buffer_default_64(struct target *target, uint64_t address,
+		uint32_t count, uint8_t *buffer);
 static int target_write_buffer_default(struct target *target, uint32_t address,
 		uint32_t count, const uint8_t *buffer);
 static int target_array2mem(Jim_Interp *interp, struct target *target,
@@ -991,17 +993,22 @@ int target_run_flash_async_algorithm(struct target *target,
 }
 
 int target_read_memory(struct target *target,
-		uint32_t address, uint32_t size, uint32_t count, uint8_t *buffer)
+		uint64_t address, uint32_t size, uint32_t count, uint8_t *buffer)
 {
+	int i;
 	if (!target_was_examined(target)) {
 		LOG_ERROR("Target not examined yet");
 		return ERROR_FAIL;
 	}
-	return target->type->read_memory(target, address, size, count, buffer);
+	if (target->reg_cache->reg_list[0].size == 64)
+		i = target->type->read_memory_64(target, address, size, count, buffer);
+	else
+		i = target->type->read_memory(target, address, size, count, buffer);
+	return i;
 }
 
 int target_read_phys_memory(struct target *target,
-		uint32_t address, uint32_t size, uint32_t count, uint8_t *buffer)
+		uint64_t address, uint32_t size, uint32_t count, uint8_t *buffer)
 {
 	if (!target_was_examined(target)) {
 		LOG_ERROR("Target not examined yet");
@@ -1218,6 +1225,9 @@ static int target_init_one(struct command_context *cmd_ctx,
 
 	if (target->type->read_buffer == NULL)
 		target->type->read_buffer = target_read_buffer_default;
+
+	if (target->type->read_buffer_64 == NULL)
+		target->type->read_buffer_64 = target_read_buffer_default_64;
 
 	if (target->type->write_buffer == NULL)
 		target->type->write_buffer = target_write_buffer_default;
@@ -1914,7 +1924,7 @@ static int target_write_buffer_default(struct target *target, uint32_t address, 
  * mode respectively, otherwise data is handled as quickly as
  * possible
  */
-int target_read_buffer(struct target *target, uint32_t address, uint32_t size, uint8_t *buffer)
+int target_read_buffer(struct target *target, uint64_t address, uint32_t size, uint8_t *buffer)
 {
 	LOG_DEBUG("reading buffer of %i byte at 0x%8.8x",
 			  (int)size, (unsigned)address);
@@ -1929,13 +1939,15 @@ int target_read_buffer(struct target *target, uint32_t address, uint32_t size, u
 
 	if ((address + size - 1) < address) {
 		/* GDB can request this when e.g. PC is 0xfffffffc*/
-		LOG_ERROR("address + size wrapped(0x%08" PRIx32 ", 0x%08" PRIx32 ")",
-				  address,
-				  size);
+		LOG_ERROR("address + size wrapped(0x%" PRIx64 ", 0x%08" PRIx32 ")",
+			  address, size);
 		return ERROR_FAIL;
 	}
 
-	return target->type->read_buffer(target, address, size, buffer);
+	if (target->reg_cache->reg_list[0].size == 64)
+		return target->type->read_buffer_64(target, address, size, buffer);
+	else
+		return target->type->read_buffer(target, address, size, buffer);
 }
 
 static int target_read_buffer_default(struct target *target, uint32_t address, uint32_t count, uint8_t *buffer)
@@ -1945,6 +1957,39 @@ static int target_read_buffer_default(struct target *target, uint32_t address, u
 	/* Align up to maximum 4 bytes. The loop condition makes sure the next pass
 	 * will have something to do with the size we leave to it. */
 	for (size = 1; size < 4 && count >= size * 2 + (address & size); size *= 2) {
+		if (address & size) {
+			int retval = target_read_memory(target, address, size, 1, buffer);
+			if (retval != ERROR_OK)
+				return retval;
+			address += size;
+			count -= size;
+			buffer += size;
+		}
+	}
+
+	/* Read the data with as large access size as possible. */
+	for (; size > 0; size /= 2) {
+		uint32_t aligned = count - count % size;
+		if (aligned > 0) {
+			int retval = target_read_memory(target, address, size, aligned / size, buffer);
+			if (retval != ERROR_OK)
+				return retval;
+			address += aligned;
+			count -= aligned;
+			buffer += aligned;
+		}
+	}
+
+	return ERROR_OK;
+}
+
+static int target_read_buffer_default_64(struct target *target, uint64_t address, uint32_t count, uint8_t *buffer)
+{
+	uint32_t size;
+
+	/* Align up to maximum 4 bytes. The loop condition makes sure the next pass
+	 * will have something to do with the size we leave to it. */
+	for (size = 1; size < 8 && count >= size * 2 + (address & size); size *= 2) {
 		if (address & size) {
 			int retval = target_read_memory(target, address, size, 1, buffer);
 			if (retval != ERROR_OK)
@@ -2818,7 +2863,7 @@ COMMAND_HANDLER(handle_md_command)
 
 	bool physical = strcmp(CMD_ARGV[0], "phys") == 0;
 	int (*fn)(struct target *target,
-			uint32_t address, uint32_t size_value, uint32_t count, uint8_t *buffer);
+			uint64_t address, uint32_t size_value, uint32_t count, uint8_t *buffer);
 	if (physical) {
 		CMD_ARGC--;
 		CMD_ARGV++;
@@ -4554,7 +4599,7 @@ static int jim_target_md(Jim_Interp *interp, int argc, Jim_Obj *const *argv)
 	}
 
 	int (*fn)(struct target *target,
-			uint32_t address, uint32_t size, uint32_t count, uint8_t *buffer);
+			uint64_t address, uint32_t size, uint32_t count, uint8_t *buffer);
 	fn = target_read_memory;
 
 	int e;
