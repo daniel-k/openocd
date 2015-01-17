@@ -1350,7 +1350,7 @@ static int gdb_read_memory_packet(struct connection *connection,
 {
 	struct target *target = get_target_from_connection(connection);
 	char *separator;
-	uint32_t addr = 0;
+	uint64_t addr = 0;
 	uint32_t len = 0;
 
 	uint8_t *buffer;
@@ -1361,7 +1361,7 @@ static int gdb_read_memory_packet(struct connection *connection,
 	/* skip command character */
 	packet++;
 
-	addr = strtoul(packet, &separator, 16);
+	addr = strtoull(packet, &separator, 16);
 
 	if (*separator != ',') {
 		LOG_ERROR("incomplete read memory packet received, dropping connection");
@@ -1378,7 +1378,7 @@ static int gdb_read_memory_packet(struct connection *connection,
 
 	buffer = malloc(len);
 
-	LOG_DEBUG("addr: 0x%8.8" PRIx32 ", len: 0x%8.8" PRIx32 "", addr, len);
+	LOG_DEBUG("addr: 0x%16.16" PRIx64 ", len: 0x%8.8" PRIx32 "", addr, len);
 
 	retval = target_read_buffer(target, addr, len, buffer);
 
