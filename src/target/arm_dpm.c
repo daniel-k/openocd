@@ -132,11 +132,11 @@ int dpm_modeswitch(struct arm_dpm *dpm, enum arm_mode mode)
 	return retval;
 }
 
-/* just read the register -- rely on the core mode being right */
-static int dpm_read_reg(struct arm_dpm *dpm, struct reg *r, unsigned regnum)
+
+static int dpm_read_reg32(struct arm_dpm *dpm, struct reg *r, unsigned regnum)
 {
 	uint32_t value;
-	int retval;
+	int retval = ERROR_FAIL;
 
 	switch (regnum) {
 		case 0 ... 14:
@@ -189,10 +189,57 @@ static int dpm_read_reg(struct arm_dpm *dpm, struct reg *r, unsigned regnum)
 	return retval;
 }
 
-/* just write the register -- rely on the core mode being right */
-static int dpm_write_reg(struct arm_dpm *dpm, struct reg *r, unsigned regnum)
+static int dpm_read_reg64(struct arm_dpm *dpm, struct reg *r, unsigned regnum)
 {
-	int retval;
+	uint64_t value;
+	uint32_t i;
+	int retval = ERROR_FAIL;
+
+	switch (regnum) {
+		case 0 ... 30:
+			i = 0xd5130400 + regnum; /* msr dbgdtr_el0,reg */
+			retval = dpm->instr_read_data_dcc_64(dpm, i, &value);
+			break;
+		case 31: /* SP */
+			i = 0x910003e0;
+			retval = dpm->instr_read_data_r0_64(dpm, i, &value);
+			break;
+		case 32: /* PC */
+			i = 0xd53b4520;
+			retval = dpm->instr_read_data_r0_64(dpm, i, &value);
+			break;
+		case 33: /* CPSR */
+			i = 0xd53b4500;
+			retval = dpm->instr_read_data_r0_64(dpm, i, &value);
+			break;
+
+		default:
+			break;
+	}
+
+	if (retval == ERROR_OK) {
+		buf_set_u64(r->value, 0, 64, value);
+		r->valid = true;
+		r->dirty = false;
+		LOG_DEBUG("READ: %s, %16.16llx", r->name, (long long)value);
+	}
+
+	return retval;
+}
+
+
+/* just read the register -- rely on the core mode being right */
+static int dpm_read_reg(struct arm_dpm *dpm, struct reg *r, unsigned regnum)
+{
+	if (r->size == 64)
+		return dpm_read_reg64(dpm, r, regnum);
+	else
+		return dpm_read_reg32(dpm, r, regnum);
+}
+
+static int dpm_write_reg32(struct arm_dpm *dpm, struct reg *r, unsigned regnum)
+{
+	int retval = ERROR_FAIL;
 	uint32_t value = buf_get_u32(r->value, 0, 32);
 
 	switch (regnum) {
@@ -230,17 +277,43 @@ static int dpm_write_reg(struct arm_dpm *dpm, struct reg *r, unsigned regnum)
 	return retval;
 }
 
-/**
- * Read basic registers of the the current context:  R0 to R15, and CPSR;
- * sets the core mode (such as USR or IRQ) and state (such as ARM or Thumb).
- * In normal operation this is called on entry to halting debug state,
- * possibly after some other operations supporting restore of debug state
- * or making sure the CPU is fully idle (drain write buffer, etc).
- */
-int arm_dpm_read_current_registers(struct arm_dpm *dpm)
+static int dpm_write_reg64(struct arm_dpm *dpm, struct reg *r, unsigned regnum)
+{
+	int retval = ERROR_FAIL;
+	uint32_t i;
+	uint64_t value = buf_get_u64(r->value, 0, 64);
+
+	switch (regnum) {
+		case 0 ... 30:
+			i = 0xd5330400 + regnum;
+			retval = dpm->instr_write_data_dcc(dpm, i, value);
+			break;
+
+		default:
+			break;
+	}
+
+	if (retval == ERROR_OK) {
+		r->dirty = false;
+		LOG_DEBUG("WRITE: %s, %16.16llx", r->name, (unsigned long long)value);
+	}
+
+	return retval;
+}
+
+/* just write the register -- rely on the core mode being right */
+static int dpm_write_reg(struct arm_dpm *dpm, struct reg *r, unsigned regnum)
+{
+	if (r->size == 64)
+		return dpm_write_reg64(dpm, r, regnum);
+	else
+		return dpm_write_reg32(dpm, r, regnum);
+}
+
+static int arm_dpm_read_current_registers_i(struct arm_dpm *dpm, int arch_mode)
 {
 	struct arm *arm = dpm->arm;
-	uint32_t cpsr;
+	uint32_t cpsr, instr, core_regs;
 	int retval;
 	struct reg *r;
 
@@ -257,16 +330,22 @@ int arm_dpm_read_current_registers(struct arm_dpm *dpm)
 	}
 	r->dirty = true;
 
-	retval = dpm->instr_read_data_r0(dpm, ARMV4_5_MRS(0, 0), &cpsr);
+	if (arch_mode == 64)
+		instr = 0xd53b4500;  /* mrs x0, dspsr_el0 */
+	else
+		instr = ARMV4_5_MRS(0, 0);
+	retval = dpm->instr_read_data_r0(dpm, instr, &cpsr);
 	if (retval != ERROR_OK)
 		goto fail;
 
 	/* update core mode and state, plus shadow mapping for R8..R14 */
 	arm_set_cpsr(arm, cpsr);
 
+	core_regs = arm->core_cache->num_regs;
+
 	/* REVISIT we can probably avoid reading R1..R14, saving time... */
-	for (unsigned i = 1; i < 16; i++) {
-		r = arm_reg_current(arm, i);
+	for (unsigned i = 1; i < core_regs; i++) {
+		r = dpm->arm_reg_current(arm, i);
 		if (r->valid)
 			continue;
 
@@ -285,6 +364,23 @@ int arm_dpm_read_current_registers(struct arm_dpm *dpm)
 fail:
 	/* (void) */ dpm->finish(dpm);
 	return retval;
+}
+
+/**
+ * Read basic registers of the the current context:  R0 to R15, and CPSR;
+ * sets the core mode (such as USR or IRQ) and state (such as ARM or Thumb).
+ * In normal operation this is called on entry to halting debug state,
+ * possibly after some other operations supporting restore of debug state
+ * or making sure the CPU is fully idle (drain write buffer, etc).
+ */
+int arm_dpm_read_current_registers(struct arm_dpm *dpm)
+{
+	return arm_dpm_read_current_registers_i(dpm, 32);
+}
+
+int arm_dpm_read_current_registers_64(struct arm_dpm *dpm)
+{
+	return arm_dpm_read_current_registers_i(dpm, 64);
 }
 
 /* Avoid needless I/O ... leave breakpoints and watchpoints alone
@@ -946,8 +1042,8 @@ int arm_dpm_setup(struct arm_dpm *dpm, int arch_mode)
 
 	/* register access setup */
 	arm->full_context = arm_dpm_full_context;
-	arm->read_core_reg = arm_dpm_read_core_reg;
-	arm->write_core_reg = arm_dpm_write_core_reg;
+	arm->read_core_reg = arm->read_core_reg ? : arm_dpm_read_core_reg;
+	arm->write_core_reg = arm->write_core_reg ? : arm_dpm_write_core_reg;
 
 	if (arch_mode == 64)
 		;
@@ -974,12 +1070,21 @@ int arm_dpm_setup(struct arm_dpm *dpm, int arch_mode)
 	target->type->add_watchpoint = dpm_add_watchpoint;
 	target->type->remove_watchpoint = dpm_remove_watchpoint;
 
+
+	if (dpm->arm_reg_current == 0)
+		dpm->arm_reg_current = arm_reg_current;
+
 	/* FIXME add vector catch support */
 
-	dpm->nbp = 1 + ((dpm->didr >> 24) & 0xf);
-	dpm->dbp = calloc(dpm->nbp, sizeof *dpm->dbp);
+	if (arch_mode == 64) {
+		dpm->nbp = 1 + ((dpm->didr >> 24) & 0xf);
+		dpm->nwp = 1 + ((dpm->didr >> 28) & 0xf);
+	} else {
+		dpm->nbp = 1 + ((dpm->didr >> 12) & 0xf);
+		dpm->nwp = 1 + ((dpm->didr >> 20) & 0xf);
+	}
 
-	dpm->nwp = 1 + ((dpm->didr >> 28) & 0xf);
+	dpm->dbp = calloc(dpm->nbp, sizeof *dpm->dbp);
 	dpm->dwp = calloc(dpm->nwp, sizeof *dpm->dwp);
 
 	if (!dpm->dbp || !dpm->dwp) {
