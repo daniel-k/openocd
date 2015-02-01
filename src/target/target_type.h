@@ -43,7 +43,7 @@ struct target_type {
 	 */
 	const char *name;
 	const char *deprecated_name;
-
+	uint32_t pc_size;
 	/* poll current target status */
 	int (*poll)(struct target *target);
 	/* Invoked only from target_arch_state().

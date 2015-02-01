@@ -28,6 +28,7 @@
 #include "target_type.h"
 #include "arm_opcodes.h"
 #include <helper/time_support.h>
+#include "armv8_opcodes.h"
 
 static int aarch64_poll(struct target *target);
 static int aarch64_debug_entry(struct target *target);
@@ -44,27 +45,57 @@ static int aarch64_mmu(struct target *target, int *enabled);
 static int aarch64_virt2phys(struct target *target,
 	uint32_t virt, uint32_t *phys);
 static int aarch64_read_apb_ab_memory(struct target *target,
-	uint64_t address, uint32_t size, uint32_t count, uint8_t *buffer);
+	uint32_t address, uint32_t size, uint32_t count, uint8_t *buffer);
 
 static int aarch64_instr_write_data_r0(struct arm_dpm *dpm,
 				       uint32_t opcode, uint32_t data);
 
 static int aarch64_restore_system_control_reg(struct target *target)
 {
-	int retval = ERROR_OK;
-
 	struct aarch64_common *aarch64 = target_to_aarch64(target);
-	struct armv8_common *armv8 = target_to_armv8(target);
+	struct armv8_common *armv8 = &aarch64->armv8_common;
+	int retval = ERROR_OK;
 
 	if (aarch64->system_control_reg != aarch64->system_control_reg_curr) {
 		aarch64->system_control_reg_curr = aarch64->system_control_reg;
-		retval = aarch64_instr_write_data_r0(armv8->arm.dpm,
-						     0xd5181000,
-						     aarch64->system_control_reg);
-	}
+		/* LOG_INFO("cp15_control_reg: %8.8" PRIx32, cortex_v8->cp15_control_reg); */
 
+		switch (armv8->arm.core_mode) {
+			case ARMV8_64_EL0T:
+			case ARMV8_64_EL1T:
+			case ARMV8_64_EL1H:
+				retval = armv8->arm.msr(target, 3, /*op 0*/
+						0, 1,	/* op1, op2 */
+						0, 0,	/* CRn, CRm */
+						aarch64->system_control_reg);
+				if (retval != ERROR_OK)
+					return retval;
+			break;
+			case ARMV8_64_EL2T:
+			case ARMV8_64_EL2H:
+				retval = armv8->arm.msr(target, 3, /*op 0*/
+						4, 1,	/* op1, op2 */
+						0, 0,	/* CRn, CRm */
+						aarch64->system_control_reg);
+				if (retval != ERROR_OK)
+					return retval;
+			break;
+			case ARMV8_64_EL3H:
+			case ARMV8_64_EL3T:
+				retval = armv8->arm.msr(target, 3, /*op 0*/
+						6, 1,	/* op1, op2 */
+						0, 0,	/* CRn, CRm */
+						aarch64->system_control_reg);
+				if (retval != ERROR_OK)
+					return retval;
+			break;
+			default:
+				LOG_DEBUG("unknow cpu state 0x%x" PRIx32, armv8->arm.core_state);
+			}
+	}
 	return retval;
 }
+
 
 /*  check address before aarch64_apb read write access with mmu on
  *  remove apb predictible data abort */
@@ -81,22 +112,50 @@ static int aarch64_mmu_modify(struct target *target, int enable)
 	struct aarch64_common *aarch64 = target_to_aarch64(target);
 	struct armv8_common *armv8 = &aarch64->armv8_common;
 	int retval = ERROR_OK;
-
 	if (enable) {
-		/*  if mmu enabled at target stop and mmu not enable */
+		/*	if mmu enabled at target stop and mmu not enable */
 		if (!(aarch64->system_control_reg & 0x1U)) {
 			LOG_ERROR("trying to enable mmu on target stopped with mmu disable");
 			return ERROR_FAIL;
 		}
 		if (!(aarch64->system_control_reg_curr & 0x1U)) {
 			aarch64->system_control_reg_curr |= 0x1U;
-			retval = aarch64_instr_write_data_r0(armv8->arm.dpm,
-							     0xd5181000,
-							     aarch64->system_control_reg_curr);
+			switch (armv8->arm.core_mode) {
+				case ARMV8_64_EL0T:
+				case ARMV8_64_EL1T:
+				case ARMV8_64_EL1H:
+					retval = armv8->arm.msr(target, 3, /*op 0*/
+							0, 0,	/* op1, op2 */
+							1, 0,	/* CRn, CRm */
+							aarch64->system_control_reg_curr);
+					if (retval != ERROR_OK)
+						return retval;
+				break;
+				case ARMV8_64_EL2T:
+				case ARMV8_64_EL2H:
+					retval = armv8->arm.msr(target, 3, /*op 0*/
+							4, 0,	/* op1, op2 */
+							1, 0,	/* CRn, CRm */
+							aarch64->system_control_reg_curr);
+					if (retval != ERROR_OK)
+						return retval;
+				break;
+				case ARMV8_64_EL3H:
+				case ARMV8_64_EL3T:
+					retval = armv8->arm.msr(target, 3, /*op 0*/
+							6, 0,	/* op1, op2 */
+							1, 0,	/* CRn, CRm */
+							aarch64->system_control_reg_curr);
+					if (retval != ERROR_OK)
+						return retval;
+				break;
+				default:
+					LOG_DEBUG("unknow cpu state 0x%x" PRIx32, armv8->arm.core_state);
+			}
 		}
 	} else {
 		if (aarch64->system_control_reg_curr & 0x4U) {
-			/*  data cache is active */
+			/*	data cache is active */
 			aarch64->system_control_reg_curr &= ~0x4U;
 			/* flush data cache armv7 function to be called */
 			if (armv8->armv8_mmu.armv8_cache.flush_all_data_cache)
@@ -104,13 +163,44 @@ static int aarch64_mmu_modify(struct target *target, int enable)
 		}
 		if ((aarch64->system_control_reg_curr & 0x1U)) {
 			aarch64->system_control_reg_curr &= ~0x1U;
-			retval = aarch64_instr_write_data_r0(armv8->arm.dpm,
-							     0xd5181000,
-							     aarch64->system_control_reg_curr);
+			switch (armv8->arm.core_mode) {
+				case ARMV8_64_EL0T:
+				case ARMV8_64_EL1T:
+				case ARMV8_64_EL1H:
+					retval = armv8->arm.msr(target, 3, /*op 0*/
+							0, 0,	/* op1, op2 */
+							1, 0,	/* CRn, CRm */
+							aarch64->system_control_reg_curr);
+					if (retval != ERROR_OK)
+						return retval;
+					break;
+				case ARMV8_64_EL2T:
+				case ARMV8_64_EL2H:
+					retval = armv8->arm.msr(target, 3, /*op 0*/
+							4, 0,	/* op1, op2 */
+							1, 0,	/* CRn, CRm */
+							aarch64->system_control_reg_curr);
+					if (retval != ERROR_OK)
+						return retval;
+					break;
+				case ARMV8_64_EL3H:
+				case ARMV8_64_EL3T:
+					retval = armv8->arm.msr(target, 3, /*op 0*/
+							6, 0,	/* op1, op2 */
+							1, 0,	/* CRn, CRm */
+							aarch64->system_control_reg_curr);
+					if (retval != ERROR_OK)
+						return retval;
+					break;
+				default:
+					LOG_DEBUG("unknow cpu state 0x%x" PRIx32, armv8->arm.core_state);
+					break;
+			}
 		}
 	}
 	return retval;
 }
+
 
 /*
  * Basic debug access, very low level assumes state is saved
@@ -127,11 +217,11 @@ static int aarch64_init_debug_access(struct target *target)
 	/* Unlocking the debug registers for modification
 	 * The debugport might be uninitialised so try twice */
 	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			     armv8->debug_base + CPUDBG_LOCKACCESS, 0xC5ACCE55);
+			     armv8->debug_base + CPUV8_DBG_LOCKACCESS, 0xC5ACCE55);
 	if (retval != ERROR_OK) {
 		/* try again */
 		retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			     armv8->debug_base + CPUDBG_LOCKACCESS, 0xC5ACCE55);
+			     armv8->debug_base + CPUV8_DBG_LOCKACCESS, 0xC5ACCE55);
 		if (retval == ERROR_OK)
 			LOG_USER("Locking debug access failed on first, but succeeded on second try.");
 	}
@@ -140,7 +230,7 @@ static int aarch64_init_debug_access(struct target *target)
 	/* Clear Sticky Power Down status Bit in PRSR to enable access to
 	   the registers in the Core Power Domain */
 	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_PRSR, &dummy);
+			armv8->debug_base + CPUV8_DBG_PRSR, &dummy);
 	if (retval != ERROR_OK)
 		return retval;
 
@@ -154,7 +244,7 @@ static int aarch64_init_debug_access(struct target *target)
 
 /* To reduce needless round-trips, pass in a pointer to the current
  * DSCR value.  Initialize it to zero if you just need to know the
- * value on return from this function; or DSCR_INSTR_COMP if you
+ * value on return from this function; or DSCR_ITE if you
  * happen to know that no instruction is pending.
  */
 static int aarch64_exec_opcode(struct target *target,
@@ -171,9 +261,9 @@ static int aarch64_exec_opcode(struct target *target,
 
 	/* Wait for InstrCompl bit to be set */
 	long long then = timeval_ms();
-	while ((dscr & DSCR_INSTR_COMP) == 0) {
+	while ((dscr & DSCR_ITE) == 0) {
 		retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-				armv8->debug_base + CPUDBG_DSCR, &dscr);
+				armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
 		if (retval != ERROR_OK) {
 			LOG_ERROR("Could not read DSCR register, opcode = 0x%08" PRIx32, opcode);
 			return retval;
@@ -185,14 +275,14 @@ static int aarch64_exec_opcode(struct target *target,
 	}
 
 	retval = mem_ap_sel_write_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_ITR, opcode);
+			armv8->debug_base + CPUV8_DBG_ITR, opcode);
 	if (retval != ERROR_OK)
 		return retval;
 
 	then = timeval_ms();
 	do {
 		retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-				armv8->debug_base + CPUDBG_DSCR, &dscr);
+				armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
 		if (retval != ERROR_OK) {
 			LOG_ERROR("Could not read DSCR register");
 			return retval;
@@ -201,7 +291,7 @@ static int aarch64_exec_opcode(struct target *target,
 			LOG_ERROR("Timeout waiting for aarch64_exec_opcode");
 			return ERROR_FAIL;
 		}
-	} while ((dscr & DSCR_INSTR_COMP) == 0);	/* Wait for InstrCompl bit to be set */
+	} while ((dscr & DSCR_ITE) == 0);	/* Wait for InstrCompl bit to be set */
 
 	if (dscr_p)
 		*dscr_p = dscr;
@@ -226,7 +316,7 @@ static int aarch64_dap_write_memap_register_u32(struct target *target,
 /*
  * AARCH64 implementation of Debug Programmer's Model
  *
- * NOTE the invariant:  these routines return with DSCR_INSTR_COMP set,
+ * NOTE the invariant:  these routines return with DSCR_ITE set,
  * so there's no need to poll for it before executing an instruction.
  *
  * NOTE that in several of these cases the "stall" mode might be useful.
@@ -243,18 +333,18 @@ static int aarch64_write_dcc(struct aarch64_common *a8, uint32_t data)
 {
 	LOG_DEBUG("write DCC 0x%08" PRIx32, data);
 	return mem_ap_sel_write_u32(a8->armv8_common.arm.dap,
-		a8->armv8_common.debug_ap, a8->armv8_common.debug_base + CPUDBG_DTRRX, data);
+		a8->armv8_common.debug_ap, a8->armv8_common.debug_base + CPUV8_DBG_DTRRX, data);
 }
 
 static int aarch64_write_dcc_64(struct aarch64_common *a8, uint64_t data)
 {
 	int ret;
-	LOG_DEBUG("write DCC 0x%08" PRIx32, (unsigned)data);
-	LOG_DEBUG("write DCC 0x%08" PRIx32, (unsigned)(data >> 32));
+	LOG_DEBUG("write DCC Low word0x%08" PRIx32, (unsigned)data);
+	LOG_DEBUG("write DCC High word 0x%08" PRIx32, (unsigned)(data >> 32));
 	ret = mem_ap_sel_write_u32(a8->armv8_common.arm.dap,
-		a8->armv8_common.debug_ap, a8->armv8_common.debug_base + CPUDBG_DTRRX, data);
+		a8->armv8_common.debug_ap, a8->armv8_common.debug_base + CPUV8_DBG_DTRRX, data);
 	ret += mem_ap_sel_write_u32(a8->armv8_common.arm.dap,
-		a8->armv8_common.debug_ap, a8->armv8_common.debug_base + CPUDBG_DTRTX, data >> 32);
+		a8->armv8_common.debug_ap, a8->armv8_common.debug_base + CPUV8_DBG_DTRTX, data >> 32);
 	return ret;
 }
 
@@ -262,7 +352,7 @@ static int aarch64_read_dcc(struct aarch64_common *a8, uint32_t *data,
 	uint32_t *dscr_p)
 {
 	struct adiv5_dap *swjdp = a8->armv8_common.arm.dap;
-	uint32_t dscr = DSCR_INSTR_COMP;
+	uint32_t dscr = DSCR_ITE;
 	int retval;
 
 	if (dscr_p)
@@ -272,7 +362,7 @@ static int aarch64_read_dcc(struct aarch64_common *a8, uint32_t *data,
 	long long then = timeval_ms();
 	while ((dscr & DSCR_DTR_TX_FULL) == 0) {
 		retval = mem_ap_sel_read_atomic_u32(swjdp, a8->armv8_common.debug_ap,
-				a8->armv8_common.debug_base + CPUDBG_DSCR,
+				a8->armv8_common.debug_base + CPUV8_DBG_DSCR,
 				&dscr);
 		if (retval != ERROR_OK)
 			return retval;
@@ -283,7 +373,7 @@ static int aarch64_read_dcc(struct aarch64_common *a8, uint32_t *data,
 	}
 
 	retval = mem_ap_sel_read_atomic_u32(swjdp, a8->armv8_common.debug_ap,
-					    a8->armv8_common.debug_base + CPUDBG_DTRTX,
+					    a8->armv8_common.debug_base + CPUV8_DBG_DTRTX,
 					    data);
 	if (retval != ERROR_OK)
 		return retval;
@@ -298,7 +388,7 @@ static int aarch64_read_dcc_64(struct aarch64_common *a8, uint64_t *data,
 	uint32_t *dscr_p)
 {
 	struct adiv5_dap *swjdp = a8->armv8_common.arm.dap;
-	uint32_t dscr = DSCR_INSTR_COMP;
+	uint32_t dscr = DSCR_ITE;
 	uint32_t higher;
 	int retval;
 
@@ -309,7 +399,7 @@ static int aarch64_read_dcc_64(struct aarch64_common *a8, uint64_t *data,
 	long long then = timeval_ms();
 	while ((dscr & DSCR_DTR_TX_FULL) == 0) {
 		retval = mem_ap_sel_read_atomic_u32(swjdp, a8->armv8_common.debug_ap,
-				a8->armv8_common.debug_base + CPUDBG_DSCR,
+				a8->armv8_common.debug_base + CPUV8_DBG_DSCR,
 				&dscr);
 		if (retval != ERROR_OK)
 			return retval;
@@ -320,13 +410,13 @@ static int aarch64_read_dcc_64(struct aarch64_common *a8, uint64_t *data,
 	}
 
 	retval = mem_ap_sel_read_atomic_u32(swjdp, a8->armv8_common.debug_ap,
-					    a8->armv8_common.debug_base + CPUDBG_DTRTX,
+					    a8->armv8_common.debug_base + CPUV8_DBG_DTRTX,
 					    (uint32_t *)data);
 	if (retval != ERROR_OK)
 		return retval;
 
 	retval = mem_ap_sel_read_atomic_u32(swjdp, a8->armv8_common.debug_ap,
-					    a8->armv8_common.debug_base + CPUDBG_DTRRX,
+					    a8->armv8_common.debug_base + CPUV8_DBG_DTRRX,
 					    &higher);
 	if (retval != ERROR_OK)
 		return retval;
@@ -351,11 +441,11 @@ static int aarch64_dpm_prepare(struct arm_dpm *dpm)
 	long long then = timeval_ms();
 	for (;; ) {
 		retval = mem_ap_sel_read_atomic_u32(swjdp, a8->armv8_common.debug_ap,
-				a8->armv8_common.debug_base + CPUDBG_DSCR,
+				a8->armv8_common.debug_base + CPUV8_DBG_DSCR,
 				&dscr);
 		if (retval != ERROR_OK)
 			return retval;
-		if ((dscr & DSCR_INSTR_COMP) != 0)
+		if ((dscr & DSCR_ITE) != 0)
 			break;
 		if (timeval_ms() > then + 1000) {
 			LOG_ERROR("Timeout waiting for dpm prepare");
@@ -367,12 +457,17 @@ static int aarch64_dpm_prepare(struct arm_dpm *dpm)
 	if (dscr & DSCR_DTR_RX_FULL) {
 		LOG_ERROR("DSCR_DTR_RX_FULL, dscr 0x%08" PRIx32, dscr);
 		/* Clear DCCRX */
-		retval = aarch64_exec_opcode(
-				a8->armv8_common.arm.target,
-				0xd5130400,
-				&dscr);
+		retval = mem_ap_sel_read_u32(swjdp, a8->armv8_common.debug_ap,
+			a8->armv8_common.debug_base + CPUV8_DBG_DTRRX, &dscr);
 		if (retval != ERROR_OK)
 			return retval;
+
+		/* Clear sticky error */
+		retval = mem_ap_sel_write_u32(swjdp, a8->armv8_common.debug_ap,
+			a8->armv8_common.debug_base + CPUV8_DBG_DRCR, DRCR_CSE);
+		if (retval != ERROR_OK)
+			return retval;
+
 	}
 
 	return retval;
@@ -384,12 +479,24 @@ static int aarch64_dpm_finish(struct arm_dpm *dpm)
 	return ERROR_OK;
 }
 
+static int aarch64_instr_execute(struct arm_dpm *dpm,
+	uint32_t opcode)
+{
+	struct aarch64_common *a8 = dpm_to_a8(dpm);
+	uint32_t dscr = DSCR_ITE;
+
+	return aarch64_exec_opcode(
+			a8->armv8_common.arm.target,
+			opcode,
+			&dscr);
+}
+
 static int aarch64_instr_write_data_dcc(struct arm_dpm *dpm,
 	uint32_t opcode, uint32_t data)
 {
 	struct aarch64_common *a8 = dpm_to_a8(dpm);
 	int retval;
-	uint32_t dscr = DSCR_INSTR_COMP;
+	uint32_t dscr = DSCR_ITE;
 
 	retval = aarch64_write_dcc(a8, data);
 	if (retval != ERROR_OK)
@@ -406,7 +513,7 @@ static int aarch64_instr_write_data_dcc_64(struct arm_dpm *dpm,
 {
 	struct aarch64_common *a8 = dpm_to_a8(dpm);
 	int retval;
-	uint32_t dscr = DSCR_INSTR_COMP;
+	uint32_t dscr = DSCR_ITE;
 
 	retval = aarch64_write_dcc_64(a8, data);
 	if (retval != ERROR_OK)
@@ -422,7 +529,7 @@ static int aarch64_instr_write_data_r0(struct arm_dpm *dpm,
 	uint32_t opcode, uint32_t data)
 {
 	struct aarch64_common *a8 = dpm_to_a8(dpm);
-	uint32_t dscr = DSCR_INSTR_COMP;
+	uint32_t dscr = DSCR_ITE;
 	int retval;
 
 	retval = aarch64_write_dcc(a8, data);
@@ -431,7 +538,34 @@ static int aarch64_instr_write_data_r0(struct arm_dpm *dpm,
 
 	retval = aarch64_exec_opcode(
 			a8->armv8_common.arm.target,
-			0xd5330500,
+			ARMV8_MRS(SYSTEM_DBG_DTRRX_EL0, 0),
+			&dscr);
+	if (retval != ERROR_OK)
+		return retval;
+
+	/* then the opcode, taking data from R0 */
+	retval = aarch64_exec_opcode(
+			a8->armv8_common.arm.target,
+			opcode,
+			&dscr);
+
+	return retval;
+}
+
+static int aarch64_instr_write_data_r0_64(struct arm_dpm *dpm,
+	uint32_t opcode, uint64_t data)
+{
+	struct aarch64_common *a8 = dpm_to_a8(dpm);
+	uint32_t dscr = DSCR_ITE;
+	int retval;
+
+	retval = aarch64_write_dcc_64(a8, data);
+	if (retval != ERROR_OK)
+		return retval;
+
+	retval = aarch64_exec_opcode(
+			a8->armv8_common.arm.target,
+			ARMV8_MRS(SYSTEM_DBG_DBGDTR_EL0, 0),
 			&dscr);
 	if (retval != ERROR_OK)
 		return retval;
@@ -448,11 +582,11 @@ static int aarch64_instr_write_data_r0(struct arm_dpm *dpm,
 static int aarch64_instr_cpsr_sync(struct arm_dpm *dpm)
 {
 	struct target *target = dpm->arm->target;
-	uint32_t dscr = DSCR_INSTR_COMP;
+	uint32_t dscr = DSCR_ITE;
 
 	/* "Prefetch flush" after modifying execution status in CPSR */
 	return aarch64_exec_opcode(target,
-			ARMV4_5_MCR(15, 0, 0, 7, 5, 4),
+			DSB_SY,
 			&dscr);
 }
 
@@ -461,7 +595,7 @@ static int aarch64_instr_read_data_dcc(struct arm_dpm *dpm,
 {
 	struct aarch64_common *a8 = dpm_to_a8(dpm);
 	int retval;
-	uint32_t dscr = DSCR_INSTR_COMP;
+	uint32_t dscr = DSCR_ITE;
 
 	/* the opcode, writing data to DCC */
 	retval = aarch64_exec_opcode(
@@ -479,7 +613,7 @@ static int aarch64_instr_read_data_dcc_64(struct arm_dpm *dpm,
 {
 	struct aarch64_common *a8 = dpm_to_a8(dpm);
 	int retval;
-	uint32_t dscr = DSCR_INSTR_COMP;
+	uint32_t dscr = DSCR_ITE;
 
 	/* the opcode, writing data to DCC */
 	retval = aarch64_exec_opcode(
@@ -496,7 +630,7 @@ static int aarch64_instr_read_data_r0(struct arm_dpm *dpm,
 	uint32_t opcode, uint32_t *data)
 {
 	struct aarch64_common *a8 = dpm_to_a8(dpm);
-	uint32_t dscr = DSCR_INSTR_COMP;
+	uint32_t dscr = DSCR_ITE;
 	int retval;
 
 	/* the opcode, writing data to R0 */
@@ -510,7 +644,7 @@ static int aarch64_instr_read_data_r0(struct arm_dpm *dpm,
 	/* write R0 to DCC */
 	retval = aarch64_exec_opcode(
 			a8->armv8_common.arm.target,
-			0xd5130400,  /* msr dbgdtr_el0, x0 */
+			ARMV8_MSR_GP(SYSTEM_DBG_DTRTX_EL0, 0),  /* msr dbgdtr_el0, x0 */
 			&dscr);
 	if (retval != ERROR_OK)
 		return retval;
@@ -522,7 +656,7 @@ static int aarch64_instr_read_data_r0_64(struct arm_dpm *dpm,
 	uint32_t opcode, uint64_t *data)
 {
 	struct aarch64_common *a8 = dpm_to_a8(dpm);
-	uint32_t dscr = DSCR_INSTR_COMP;
+	uint32_t dscr = DSCR_ITE;
 	int retval;
 
 	/* the opcode, writing data to R0 */
@@ -536,7 +670,7 @@ static int aarch64_instr_read_data_r0_64(struct arm_dpm *dpm,
 	/* write R0 to DCC */
 	retval = aarch64_exec_opcode(
 			a8->armv8_common.arm.target,
-			0xd5130400,  /* msr dbgdtr_el0, x0 */
+			ARMV8_MSR_GP(SYSTEM_DBG_DBGDTR_EL0, 0),  /* msr dbgdtr_el0, x0 */
 			&dscr);
 	if (retval != ERROR_OK)
 		return retval;
@@ -554,19 +688,19 @@ static int aarch64_bpwp_enable(struct arm_dpm *dpm, unsigned index_t,
 
 	switch (index_t) {
 		case 0 ... 15:	/* breakpoints */
-			vr += CPUDBG_BVR_BASE;
-			cr += CPUDBG_BCR_BASE;
+			vr += CPUV8_DBG_BVR_BASE;
+			cr += CPUV8_DBG_BCR_BASE;
 			break;
 		case 16 ... 31:	/* watchpoints */
-			vr += CPUDBG_WVR_BASE;
-			cr += CPUDBG_WCR_BASE;
+			vr += CPUV8_DBG_WVR_BASE;
+			cr += CPUV8_DBG_WCR_BASE;
 			index_t -= 16;
 			break;
 		default:
 			return ERROR_FAIL;
 	}
-	vr += 4 * index_t;
-	cr += 4 * index_t;
+	vr += 16 * index_t;
+	cr += 16 * index_t;
 
 	LOG_DEBUG("A8: bpwp enable, vr %08x cr %08x",
 		(unsigned) vr, (unsigned) cr);
@@ -582,33 +716,30 @@ static int aarch64_bpwp_enable(struct arm_dpm *dpm, unsigned index_t,
 
 static int aarch64_bpwp_disable(struct arm_dpm *dpm, unsigned index_t)
 {
-	return ERROR_OK;
-
-#if 0
-	struct aarch64_common *a8 = dpm_to_a8(dpm);
+	struct aarch64_common *a = dpm_to_a8(dpm);
 	uint32_t cr;
 
 	switch (index_t) {
 		case 0 ... 15:
-			cr = a8->armv8_common.debug_base + CPUDBG_BCR_BASE;
+			cr = a->armv8_common.debug_base + CPUV8_DBG_BCR_BASE;
 			break;
 		case 16 ... 31:
-			cr = a8->armv8_common.debug_base + CPUDBG_WCR_BASE;
+			cr = a->armv8_common.debug_base + CPUV8_DBG_WCR_BASE;
 			index_t -= 16;
 			break;
 		default:
 			return ERROR_FAIL;
 	}
-	cr += 4 * index_t;
+	cr += 16 * index_t;
 
-	LOG_DEBUG("A8: bpwp disable, cr %08x", (unsigned) cr);
+	LOG_DEBUG("A: bpwp disable, cr %08x", (unsigned) cr);
 
 	/* clear control register */
 	return aarch64_dap_write_memap_register_u32(dpm->arm->target, cr, 0);
-#endif
+
 }
 
-static int aarch64_dpm_setup(struct aarch64_common *a8, uint32_t debug)
+static int aarch64_dpm_setup(struct aarch64_common *a8, uint64_t debug)
 {
 	struct arm_dpm *dpm = &a8->armv8_common.dpm;
 	int retval;
@@ -619,8 +750,12 @@ static int aarch64_dpm_setup(struct aarch64_common *a8, uint32_t debug)
 	dpm->prepare = aarch64_dpm_prepare;
 	dpm->finish = aarch64_dpm_finish;
 
+	dpm->instr_execute = aarch64_instr_execute;
 	dpm->instr_write_data_dcc = aarch64_instr_write_data_dcc;
+	dpm->instr_write_data_dcc_64 = aarch64_instr_write_data_dcc_64;
 	dpm->instr_write_data_r0 = aarch64_instr_write_data_r0;
+	dpm->instr_write_data_r0_64 = aarch64_instr_write_data_r0_64;
+
 	dpm->instr_cpsr_sync = aarch64_instr_cpsr_sync;
 
 	dpm->instr_read_data_dcc = aarch64_instr_read_data_dcc;
@@ -628,14 +763,14 @@ static int aarch64_dpm_setup(struct aarch64_common *a8, uint32_t debug)
 	dpm->instr_read_data_r0 = aarch64_instr_read_data_r0;
 	dpm->instr_read_data_r0_64 = aarch64_instr_read_data_r0_64;
 
-	dpm->arm_reg_current = armv8_reg_current;
+/*	dpm->arm_reg_current = armv8_reg_current;*/
 
 	dpm->bpwp_enable = aarch64_bpwp_enable;
 	dpm->bpwp_disable = aarch64_bpwp_disable;
 
-	retval = arm_dpm_setup(dpm, 64);
+	retval = armv8_dpm_setup(dpm);
 	if (retval == ERROR_OK)
-		retval = arm_dpm_initialize(dpm);
+		retval = armv8_dpm_initialize(dpm);
 
 	return retval;
 }
@@ -706,12 +841,12 @@ static int aarch64_poll(struct target *target)
 		return retval;
 	}
 	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_DSCR, &dscr);
+			armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
 	if (retval != ERROR_OK)
 		return retval;
 	aarch64->cpudbg_dscr = dscr;
 
-	if (DSCR_RUN_MODE(dscr) == (DSCR_CORE_HALTED | DSCR_CORE_RESTARTED)) {
+	if (DSCR_RUN_MODE(dscr) != 0) {
 		if (prev_target_state != TARGET_HALTED) {
 			/* We have a halting debug event */
 			LOG_DEBUG("Target halted");
@@ -746,7 +881,7 @@ static int aarch64_poll(struct target *target)
 					TARGET_EVENT_DEBUG_HALTED);
 			}
 		}
-	} else if (DSCR_RUN_MODE(dscr) == DSCR_CORE_RESTARTED)
+	} else if ((DSCR_RUN_MODE(dscr) & DSCR_HALT_MASK) == 0)
 		target->state = TARGET_RUNNING;
 	else {
 		LOG_DEBUG("Unknown target state dscr = 0x%08" PRIx32, dscr);
@@ -763,68 +898,58 @@ static int aarch64_halt(struct target *target)
 	struct armv8_common *armv8 = target_to_armv8(target);
 	struct adiv5_dap *swjdp = armv8->arm.dap;
 
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0, &dscr);
+	/* enable CTI*/
 	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0, 1);
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0, &dscr);
-
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0x140, &dscr);
-	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0x140, 6);
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0x140, &dscr);
-
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0xa0, &dscr);
-	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0xa0, 5);
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0xa0, &dscr);
-
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0xa4, &dscr);
-	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0xa4, 2);
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0xa4, &dscr);
-
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0x20, &dscr);
-	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0x20, 4);
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0x20, &dscr);
-
-	/*
-	 * enter halting debug mode
-	 */
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_DSCR, &dscr);
+			armv8->cti_base + CTI_CTR, 1);
 	if (retval != ERROR_OK)
 		return retval;
 
-#	/* STATUS */
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0x134, &dscr);
-
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0x1c, &dscr);
 	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0x1c, 1);
+			armv8->cti_base + CTI_GATE, 3);
+	if (retval != ERROR_OK)
+		return retval;
+
+	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->cti_base + CTI_OUTEN0, 1);
+	if (retval != ERROR_OK)
+		return retval;
+
+	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->cti_base + CTI_OUTEN1, 2);
+	if (retval != ERROR_OK)
+		return retval;
+
+	/*
+	 * add HDE in halting debug mode
+	 */
 	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0x1c, &dscr);
+			armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
+	if (retval != ERROR_OK)
+		return retval;
+
+	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_DSCR, dscr | DSCR_HDE);
+	if (retval != ERROR_OK)
+		return retval;
+
+	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->cti_base + CTI_APPPULSE, 1);
+	if (retval != ERROR_OK)
+		return retval;
+
+	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->cti_base + CTI_INACK, 1);
+	if (retval != ERROR_OK)
+		return retval;
 
 
 	long long then = timeval_ms();
 	for (;; ) {
 		retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-				armv8->debug_base + CPUDBG_DSCR, &dscr);
+				armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
 		if (retval != ERROR_OK)
 			return retval;
-		if ((dscr & DSCR_CORE_HALTED) != 0)
+		if ((dscr & DSCR_HALT_MASK) != 0)
 			break;
 		if (timeval_ms() > then + 1000) {
 			LOG_ERROR("Timeout waiting for halt");
@@ -860,6 +985,9 @@ static int aarch64_internal_restore(struct target *target, int current,
 	 */
 	switch (arm->core_state) {
 		case ARM_STATE_ARM:
+			resume_pc &= 0xFFFFFFFC;
+			break;
+		case ARM_STATE_AARCH64:
 			resume_pc &= 0xFFFFFFFFFFFFFFFC;
 			break;
 		case ARM_STATE_THUMB:
@@ -877,10 +1005,8 @@ static int aarch64_internal_restore(struct target *target, int current,
 	buf_set_u64(arm->pc->value, 0, 64, resume_pc);
 	arm->pc->dirty = 1;
 	arm->pc->valid = 1;
-#if 0
-	/* restore dpm_mode at system halt */
-	dpm_modeswitch(&armv8->dpm, ARM_MODE_ANY);
-#endif
+	dpmv8_modeswitch(&armv8->dpm, ARM_MODE_ANY);
+
 	/* called it now before restoring context because it uses cpu
 	 * register r0 for restoring system control register */
 	retval = aarch64_restore_system_control_reg(target);
@@ -928,41 +1054,25 @@ static int aarch64_internal_restart(struct target *target)
 	 */
 
 	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_DSCR, &dscr);
+			armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
 	if (retval != ERROR_OK)
 		return retval;
 
-	if ((dscr & DSCR_INSTR_COMP) == 0)
+	if ((dscr & DSCR_ITE) == 0)
 		LOG_ERROR("DSCR InstrCompl must be set before leaving debug!");
 
 	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_DSCR, dscr & ~DSCR_ITR_EN);
-	if (retval != ERROR_OK)
-		return retval;
-
-	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_DRCR, DRCR_RESTART |
-			DRCR_CLEAR_EXCEPTIONS);
-	if (retval != ERROR_OK)
-		return retval;
-
-	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0x10, 1);
-	if (retval != ERROR_OK)
-		return retval;
-
-	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x10000 + 0x1c, 2);
+			armv8->cti_base + CTI_APPPULSE, 2);
 	if (retval != ERROR_OK)
 		return retval;
 
 	long long then = timeval_ms();
 	for (;; ) {
 		retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-				armv8->debug_base + CPUDBG_DSCR, &dscr);
+				armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
 		if (retval != ERROR_OK)
 			return retval;
-		if ((dscr & DSCR_CORE_RESTARTED) != 0)
+		if ((dscr & DSCR_HDE) != 0)
 			break;
 		if (timeval_ms() > then + 1000) {
 			LOG_ERROR("Timeout waiting for resume");
@@ -1054,7 +1164,7 @@ static int aarch64_debug_entry(struct target *target)
 
 	/* REVISIT surely we should not re-read DSCR !! */
 	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_DSCR, &dscr);
+			armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
 	if (retval != ERROR_OK)
 		return retval;
 
@@ -1062,30 +1172,37 @@ static int aarch64_debug_entry(struct target *target)
 	 * imprecise data aborts get discarded by issuing a Data
 	 * Synchronization Barrier:  ARMV4_5_MCR(15, 0, 0, 7, 10, 4).
 	 */
-
-	/* Enable the ITR execution once we are in debug mode */
-	dscr |= DSCR_ITR_EN;
-	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_DSCR, dscr);
-	if (retval != ERROR_OK)
-		return retval;
-
 	/* Examine debug reason */
-	arm_dpm_report_dscr(&armv8->dpm, aarch64->cpudbg_dscr);
+	armv8_dpm_report_dscr(&armv8->dpm, aarch64->cpudbg_dscr);
 
 	/* save address of instruction that triggered the watchpoint? */
 	if (target->debug_reason == DBG_REASON_WATCHPOINT) {
-		uint32_t wfar;
+		uint32_t tmp;
+		uint64_t wfar = 0;
 
 		retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-				armv8->debug_base + CPUDBG_WFAR,
-				&wfar);
+				armv8->debug_base + CPUV8_DBG_WFAR1,
+				&tmp);
 		if (retval != ERROR_OK)
 			return retval;
-		arm_dpm_report_wfar(&armv8->dpm, wfar);
+		wfar = tmp;
+		wfar = (wfar << 32);
+		retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
+				armv8->debug_base + CPUV8_DBG_WFAR0,
+				&tmp);
+		if (retval != ERROR_OK)
+			return retval;
+		wfar |= tmp;
+		armv8_dpm_report_wfar(&armv8->dpm, wfar);
 	}
 
-	retval = arm_dpm_read_current_registers_64(&armv8->dpm);
+
+	retval = armv8_dpm_read_current_registers(&armv8->dpm);
+
+	if (armv8->arm.core_state == ARM_STATE_AARCH64)
+		target->type->pc_size = 64;
+	else if (armv8->arm.core_state == ARM_STATE_ARM)
+		target->type->pc_size = 32;
 
 	if (armv8->post_debug_entry) {
 		retval = armv8->post_debug_entry(target);
@@ -1100,31 +1217,55 @@ static int aarch64_post_debug_entry(struct target *target)
 {
 	struct aarch64_common *aarch64 = target_to_aarch64(target);
 	struct armv8_common *armv8 = &aarch64->armv8_common;
-	struct armv8_mmu_common *armv8_mmu = &armv8->armv8_mmu;
-	uint32_t sctlr_el1 = 0;
 	int retval;
 
 	mem_ap_sel_write_atomic_u32(armv8->arm.dap, armv8->debug_ap,
-				    armv8->debug_base + CPUDBG_DRCR, 1<<2);
-	retval = aarch64_instr_read_data_r0(armv8->arm.dpm,
-					    0xd5381000, &sctlr_el1);
-	if (retval != ERROR_OK)
-		return retval;
+				    armv8->debug_base + CPUV8_DBG_DRCR, 1<<2);
+	switch (armv8->arm.core_mode) {
+		case ARMV8_64_EL0T:
+		case ARMV8_64_EL1T:
+		case ARMV8_64_EL1H:
+			retval = armv8->arm.mrs(target, 3, /*op 0*/
+					0, 0,	/* op1, op2 */
+					1, 0,	/* CRn, CRm */
+					&aarch64->system_control_reg);
+			if (retval != ERROR_OK)
+				return retval;
+		break;
+		case ARMV8_64_EL2T:
+		case ARMV8_64_EL2H:
+			retval = armv8->arm.mrs(target, 3, /*op 0*/
+					4, 0,	/* op1, op2 */
+					1, 0,	/* CRn, CRm */
+					&aarch64->system_control_reg);
+			if (retval != ERROR_OK)
+				return retval;
+		break;
+		case ARMV8_64_EL3H:
+		case ARMV8_64_EL3T:
+			retval = armv8->arm.mrs(target, 3, /*op 0*/
+					6, 0,	/* op1, op2 */
+					1, 0,	/* CRn, CRm */
+					&aarch64->system_control_reg);
+			if (retval != ERROR_OK)
+				return retval;
+		break;
+		default:
+			LOG_DEBUG("unknow cpu state 0x%x" PRIx32, armv8->arm.core_state);
+	}
+	LOG_DEBUG("System_register: %8.8" PRIx32, aarch64->system_control_reg);
+	aarch64->system_control_reg_curr = aarch64->system_control_reg;
 
-	LOG_DEBUG("sctlr_el1 = %#8.8x", sctlr_el1);
-	aarch64->system_control_reg = sctlr_el1;
-	aarch64->system_control_reg_curr = sctlr_el1;
-	aarch64->curr_mode = armv8->arm.core_mode;
-
-	armv8_mmu->mmu_enabled = sctlr_el1 & 0x1U ? 1 : 0;
-	armv8_mmu->armv8_cache.d_u_cache_enabled = sctlr_el1 & 0x4U ? 1 : 0;
-	armv8_mmu->armv8_cache.i_cache_enabled = sctlr_el1 & 0x1000U ? 1 : 0;
-
-#if 0
 	if (armv8->armv8_mmu.armv8_cache.ctype == -1)
 		armv8_identify_cache(target);
-#endif
 
+	armv8->armv8_mmu.mmu_enabled =
+			(aarch64->system_control_reg & 0x1U) ? 1 : 0;
+	armv8->armv8_mmu.armv8_cache.d_u_cache_enabled =
+		(aarch64->system_control_reg & 0x4U) ? 1 : 0;
+	armv8->armv8_mmu.armv8_cache.i_cache_enabled =
+		(aarch64->system_control_reg & 0x1000U) ? 1 : 0;
+	aarch64->curr_mode = armv8->arm.core_mode;
 	return ERROR_OK;
 }
 
@@ -1132,46 +1273,24 @@ static int aarch64_step(struct target *target, int current, uint32_t address,
 	int handle_breakpoints)
 {
 	struct armv8_common *armv8 = target_to_armv8(target);
-	struct arm *arm = &armv8->arm;
-	struct breakpoint *breakpoint = NULL;
-	struct breakpoint stepbreakpoint;
-	struct reg *r;
+	struct adiv5_dap *swjdp = armv8->arm.dap;
 	int retval;
+	uint32_t tmp;
 
 	if (target->state != TARGET_HALTED) {
 		LOG_WARNING("target not halted");
 		return ERROR_TARGET_NOT_HALTED;
 	}
 
-	/* current = 1: continue on current pc, otherwise continue at <address> */
-	r = arm->pc;
-	if (!current)
-		buf_set_u64(r->value, 0, 64, address);
-	else
-		address = buf_get_u64(r->value, 0, 64);
+	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_EDECR, &tmp);
+	if (retval != ERROR_OK)
+		return retval;
 
-	/* The front-end may request us not to handle breakpoints.
-	 * But since Cortex-A8 uses breakpoint for single step,
-	 * we MUST handle breakpoints.
-	 */
-	handle_breakpoints = 1;
-	if (handle_breakpoints) {
-		breakpoint = breakpoint_find(target, address);
-		if (breakpoint)
-			aarch64_unset_breakpoint(target, breakpoint);
-	}
-
-	/* Setup single step breakpoint */
-	stepbreakpoint.address = address;
-	stepbreakpoint.length = (arm->core_state == ARM_STATE_THUMB)
-		? 2 : 4;
-	stepbreakpoint.type = BKPT_HARD;
-	stepbreakpoint.set = 0;
-
-	/* Break on IVA mismatch */
-	aarch64_set_breakpoint(target, &stepbreakpoint, 0x04);
-
-	target->debug_reason = DBG_REASON_SINGLESTEP;
+	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_EDECR, (tmp|0x4));
+	if (retval != ERROR_OK)
+		return retval;
 
 	retval = aarch64_resume(target, 1, address, 0, 0);
 	if (retval != ERROR_OK)
@@ -1188,12 +1307,11 @@ static int aarch64_step(struct target *target, int current, uint32_t address,
 		}
 	}
 
-	aarch64_unset_breakpoint(target, &stepbreakpoint);
-
 	target->debug_reason = DBG_REASON_BREAKPOINT;
-
-	if (breakpoint)
-		aarch64_set_breakpoint(target, breakpoint, 0);
+	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + 0x24, (tmp&(~0x4)));
+	if (retval != ERROR_OK)
+		return retval;
 
 	if (target->state != TARGET_HALTED)
 		LOG_DEBUG("target stepped");
@@ -1203,17 +1321,13 @@ static int aarch64_step(struct target *target, int current, uint32_t address,
 
 static int aarch64_restore_context(struct target *target, bool bpwp)
 {
-#if 0
 	struct armv8_common *armv8 = target_to_armv8(target);
-
 	LOG_DEBUG(" ");
-
 	if (armv8->pre_restore_context)
 		armv8->pre_restore_context(target);
 
-	return arm_dpm_write_dirty_registers(&armv8->dpm, bpwp);
-#endif
-	return ERROR_OK;
+	return armv8_dpm_write_dirty_registers(&armv8->dpm, bpwp);
+
 }
 
 /*
@@ -1249,45 +1363,49 @@ static int aarch64_set_breakpoint(struct target *target,
 			byte_addr_select = (3 << (breakpoint->address & 0x02));
 		control = ((matchmode & 0x7) << 20)
 			| (byte_addr_select << 5)
-			| (3 << 1) | 1;
+			| (3 << 1) | (1 << 13) | 1;
 		brp_list[brp_i].used = 1;
-		brp_list[brp_i].value = (breakpoint->address & 0xFFFFFFFC);
+		brp_list[brp_i].value = (breakpoint->address_64 & 0xFFFFFFFFFFFFFFFC);
 		brp_list[brp_i].control = control;
 		retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
-				+ CPUDBG_BVR_BASE + 4 * brp_list[brp_i].BRPn,
-				brp_list[brp_i].value);
+				+ CPUV8_DBG_BVR_BASE + 16 * brp_list[brp_i].BRPn,
+				(uint32_t)(brp_list[brp_i].value & 0xFFFFFFFF));
+		if (retval != ERROR_OK)
+			return retval;
+
+		retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
+				+ CPUV8_DBG_BVR_BASE + 4 + 16 * brp_list[brp_i].BRPn,
+				(uint32_t)(brp_list[brp_i].value >> 32));
 		if (retval != ERROR_OK)
 			return retval;
 		retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
-				+ CPUDBG_BCR_BASE + 4 * brp_list[brp_i].BRPn,
+				+ CPUV8_DBG_BCR_BASE + 16 * brp_list[brp_i].BRPn,
 				brp_list[brp_i].control);
 		if (retval != ERROR_OK)
 			return retval;
-		LOG_DEBUG("brp %i control 0x%0" PRIx32 " value 0x%0" PRIx32, brp_i,
+		LOG_DEBUG("brp %i control 0x%0" PRIx32 " value 0x%0" PRIx64, brp_i,
 			brp_list[brp_i].control,
 			brp_list[brp_i].value);
 	} else if (breakpoint->type == BKPT_SOFT) {
 		uint8_t code[4];
-		if (breakpoint->length == 2)
-			buf_set_u32(code, 0, 32, ARMV5_T_BKPT(0x11));
-		else
-			buf_set_u32(code, 0, 32, ARMV5_BKPT(0x11));
+		buf_set_u32(code, 0, 32, ARMV8_BKPT(0x11));
 		retval = target_read_memory(target,
-				breakpoint->address & 0xFFFFFFFE,
+				breakpoint->address_64 & 0xFFFFFFFE,
 				breakpoint->length, 1,
 				breakpoint->orig_instr);
 		if (retval != ERROR_OK)
 			return retval;
 		retval = target_write_memory(target,
-				breakpoint->address & 0xFFFFFFFE,
+				breakpoint->address_64 & 0xFFFFFFFE,
 				breakpoint->length, 1, code);
 		if (retval != ERROR_OK)
 			return retval;
-		breakpoint->set = 0x11;	/* Any nice value but 0 */
+		breakpoint->set = 0x11; /* Any nice value but 0 */
 	}
 
 	return ERROR_OK;
 }
+
 
 static int aarch64_set_context_breakpoint(struct target *target,
 	struct breakpoint *breakpoint, uint8_t matchmode)
@@ -1316,27 +1434,28 @@ static int aarch64_set_context_breakpoint(struct target *target,
 
 	breakpoint->set = brp_i + 1;
 	control = ((matchmode & 0x7) << 20)
-		| (byte_addr_select << 5)
-		| (3 << 1) | 1;
+			| (byte_addr_select << 5)
+			| (3 << 1) | (1 << 13) | 1;
 	brp_list[brp_i].used = 1;
 	brp_list[brp_i].value = (breakpoint->asid);
 	brp_list[brp_i].control = control;
 	retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
-			+ CPUDBG_BVR_BASE + 4 * brp_list[brp_i].BRPn,
-			brp_list[brp_i].value);
+			+ CPUV8_DBG_BVR_BASE + 16 * brp_list[brp_i].BRPn,
+			(uint32_t)(brp_list[brp_i].value & 0xFFFFFFFF));
 	if (retval != ERROR_OK)
 		return retval;
 	retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
-			+ CPUDBG_BCR_BASE + 4 * brp_list[brp_i].BRPn,
+			+ CPUV8_DBG_BCR_BASE + 16 * brp_list[brp_i].BRPn,
 			brp_list[brp_i].control);
 	if (retval != ERROR_OK)
 		return retval;
-	LOG_DEBUG("brp %i control 0x%0" PRIx32 " value 0x%0" PRIx32, brp_i,
+	LOG_DEBUG("brp %i control 0x%0" PRIx32 " value 0x%0" PRIx64, brp_i,
 		brp_list[brp_i].control,
 		brp_list[brp_i].value);
 	return ERROR_OK;
 
 }
+
 
 static int aarch64_set_hybrid_breakpoint(struct target *target, struct breakpoint *breakpoint)
 {
@@ -1383,17 +1502,17 @@ static int aarch64_set_hybrid_breakpoint(struct target *target, struct breakpoin
 		| (brp_2 << 16)
 		| (0 << 14)
 		| (CTX_byte_addr_select << 5)
-		| (3 << 1) | 1;
+		| (3 << 1) | (1 << 13) | 1;
 	brp_list[brp_1].used = 1;
 	brp_list[brp_1].value = (breakpoint->asid);
 	brp_list[brp_1].control = control_CTX;
 	retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
-			+ CPUDBG_BVR_BASE + 4 * brp_list[brp_1].BRPn,
+			+ CPUV8_DBG_BVR_BASE + 16 * brp_list[brp_1].BRPn,
 			brp_list[brp_1].value);
 	if (retval != ERROR_OK)
 		return retval;
 	retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
-			+ CPUDBG_BCR_BASE + 4 * brp_list[brp_1].BRPn,
+			+ CPUV8_DBG_BCR_BASE + 16 * brp_list[brp_1].BRPn,
 			brp_list[brp_1].control);
 	if (retval != ERROR_OK)
 		return retval;
@@ -1401,23 +1520,30 @@ static int aarch64_set_hybrid_breakpoint(struct target *target, struct breakpoin
 	control_IVA = ((IVA_machmode & 0x7) << 20)
 		| (brp_1 << 16)
 		| (IVA_byte_addr_select << 5)
-		| (3 << 1) | 1;
+		| (3 << 1) | (1 << 13) | 1;
 	brp_list[brp_2].used = 1;
-	brp_list[brp_2].value = (breakpoint->address & 0xFFFFFFFC);
+	brp_list[brp_2].value = (breakpoint->address_64 & 0xFFFFFFFFFFFFFFFC);
 	brp_list[brp_2].control = control_IVA;
 	retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
-			+ CPUDBG_BVR_BASE + 4 * brp_list[brp_2].BRPn,
-			brp_list[brp_2].value);
+			+ CPUV8_DBG_BVR_BASE + 16 * brp_list[brp_2].BRPn,
+			(uint32_t)(brp_list[brp_2].value & 0xFFFFFFFF));
 	if (retval != ERROR_OK)
 		return retval;
 	retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
-			+ CPUDBG_BCR_BASE + 4 * brp_list[brp_2].BRPn,
+			+ CPUV8_DBG_BVR_BASE + 4 + 16 * brp_list[brp_2].BRPn,
+			(uint32_t)(brp_list[brp_2].value >> 32));
+	if (retval != ERROR_OK)
+		return retval;
+
+	retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
+			+ CPUV8_DBG_BCR_BASE + 16 * brp_list[brp_2].BRPn,
 			brp_list[brp_2].control);
 	if (retval != ERROR_OK)
 		return retval;
 
 	return ERROR_OK;
 }
+
 
 static int aarch64_unset_breakpoint(struct target *target, struct breakpoint *breakpoint)
 {
@@ -1439,40 +1565,51 @@ static int aarch64_unset_breakpoint(struct target *target, struct breakpoint *br
 				LOG_DEBUG("Invalid BRP number in breakpoint");
 				return ERROR_OK;
 			}
-			LOG_DEBUG("rbp %i control 0x%0" PRIx32 " value 0x%0" PRIx32, brp_i,
+			LOG_DEBUG("rbp %i control 0x%0" PRIx32 " value 0x%0" PRIx64, brp_i,
 				brp_list[brp_i].control, brp_list[brp_i].value);
 			brp_list[brp_i].used = 0;
 			brp_list[brp_i].value = 0;
 			brp_list[brp_i].control = 0;
 			retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
-					+ CPUDBG_BCR_BASE + 4 * brp_list[brp_i].BRPn,
+					+ CPUV8_DBG_BCR_BASE + 16 * brp_list[brp_i].BRPn,
 					brp_list[brp_i].control);
 			if (retval != ERROR_OK)
 				return retval;
 			retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
-					+ CPUDBG_BVR_BASE + 4 * brp_list[brp_i].BRPn,
-					brp_list[brp_i].value);
+					+ CPUV8_DBG_BVR_BASE + 16 * brp_list[brp_i].BRPn,
+					(uint32_t)brp_list[brp_i].value);
+			if (retval != ERROR_OK)
+				return retval;
+			retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
+					+ CPUV8_DBG_BVR_BASE + 4 + 16 * brp_list[brp_i].BRPn,
+					(uint32_t)brp_list[brp_i].value);
 			if (retval != ERROR_OK)
 				return retval;
 			if ((brp_j < 0) || (brp_j >= aarch64->brp_num)) {
 				LOG_DEBUG("Invalid BRP number in breakpoint");
 				return ERROR_OK;
 			}
-			LOG_DEBUG("rbp %i control 0x%0" PRIx32 " value 0x%0" PRIx32, brp_j,
+			LOG_DEBUG("rbp %i control 0x%0" PRIx32 " value 0x%0" PRIx64, brp_j,
 				brp_list[brp_j].control, brp_list[brp_j].value);
 			brp_list[brp_j].used = 0;
 			brp_list[brp_j].value = 0;
 			brp_list[brp_j].control = 0;
 			retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
-					+ CPUDBG_BCR_BASE + 4 * brp_list[brp_j].BRPn,
+					+ CPUV8_DBG_BCR_BASE + 16 * brp_list[brp_j].BRPn,
 					brp_list[brp_j].control);
 			if (retval != ERROR_OK)
 				return retval;
 			retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
-					+ CPUDBG_BVR_BASE + 4 * brp_list[brp_j].BRPn,
-					brp_list[brp_j].value);
+					+ CPUV8_DBG_BVR_BASE + 16 * brp_list[brp_j].BRPn,
+					(uint32_t)brp_list[brp_j].value);
 			if (retval != ERROR_OK)
 				return retval;
+			retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
+					+ CPUV8_DBG_BVR_BASE + 4 + 16 * brp_list[brp_j].BRPn,
+					(uint32_t)brp_list[brp_j].value);
+			if (retval != ERROR_OK)
+				return retval;
+
 			breakpoint->linked_BRP = 0;
 			breakpoint->set = 0;
 			return ERROR_OK;
@@ -1483,19 +1620,25 @@ static int aarch64_unset_breakpoint(struct target *target, struct breakpoint *br
 				LOG_DEBUG("Invalid BRP number in breakpoint");
 				return ERROR_OK;
 			}
-			LOG_DEBUG("rbp %i control 0x%0" PRIx32 " value 0x%0" PRIx32, brp_i,
+			LOG_DEBUG("rbp %i control 0x%0" PRIx32 " value 0x%0" PRIx64, brp_i,
 				brp_list[brp_i].control, brp_list[brp_i].value);
 			brp_list[brp_i].used = 0;
 			brp_list[brp_i].value = 0;
 			brp_list[brp_i].control = 0;
 			retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
-					+ CPUDBG_BCR_BASE + 4 * brp_list[brp_i].BRPn,
+					+ CPUV8_DBG_BCR_BASE + 16 * brp_list[brp_i].BRPn,
 					brp_list[brp_i].control);
 			if (retval != ERROR_OK)
 				return retval;
 			retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
-					+ CPUDBG_BVR_BASE + 4 * brp_list[brp_i].BRPn,
-					brp_list[brp_i].value);
+					+ CPUV8_DBG_BVR_BASE + 16 * brp_list[brp_i].BRPn,
+					(uint32_t)brp_list[brp_i].value);
+			if (retval != ERROR_OK)
+				return retval;
+
+			retval = aarch64_dap_write_memap_register_u32(target, armv8->debug_base
+					+ CPUV8_DBG_BVR_BASE + 4 + 16 * brp_list[brp_i].BRPn,
+					(uint32_t)brp_list[brp_i].value);
 			if (retval != ERROR_OK)
 				return retval;
 			breakpoint->set = 0;
@@ -1505,13 +1648,13 @@ static int aarch64_unset_breakpoint(struct target *target, struct breakpoint *br
 		/* restore original instruction (kept in target endianness) */
 		if (breakpoint->length == 4) {
 			retval = target_write_memory(target,
-					breakpoint->address & 0xFFFFFFFE,
+					breakpoint->address_64 & 0xFFFFFFFE,
 					4, 1, breakpoint->orig_instr);
 			if (retval != ERROR_OK)
 				return retval;
 		} else {
 			retval = target_write_memory(target,
-					breakpoint->address & 0xFFFFFFFE,
+					breakpoint->address_64 & 0xFFFFFFFE,
 					2, 1, breakpoint->orig_instr);
 			if (retval != ERROR_OK)
 				return retval;
@@ -1521,6 +1664,7 @@ static int aarch64_unset_breakpoint(struct target *target, struct breakpoint *br
 
 	return ERROR_OK;
 }
+
 
 static int aarch64_add_breakpoint(struct target *target,
 	struct breakpoint *breakpoint)
@@ -1656,7 +1800,6 @@ static int aarch64_write_apb_ab_memory(struct target *target,
 	uint32_t count, const uint8_t *buffer)
 {
 	/* write memory through APB-AP */
-
 	int retval = ERROR_COMMAND_SYNTAX_ERROR;
 	struct armv8_common *armv8 = target_to_armv8(target);
 	struct arm *arm = &armv8->arm;
@@ -1669,7 +1812,7 @@ static int aarch64_write_apb_ab_memory(struct target *target,
 	uint32_t dscr;
 	uint8_t *tmp_buff = NULL;
 
-	LOG_DEBUG("Writing APB-AP memory address 0x%" PRIx32 " size %"  PRIu32 " count%"  PRIu32,
+	LOG_DEBUG("Writing APB-AP memory address 0x%" PRIx32 " size %"	PRIu32 " count%"  PRIu32,
 			  address, size, count);
 	if (target->state != TARGET_HALTED) {
 		LOG_WARNING("target not halted");
@@ -1683,16 +1826,19 @@ static int aarch64_write_apb_ab_memory(struct target *target,
 	 * It will be restored automatically when exiting
 	 * debug mode
 	 */
+	reg = armv8_reg_current(arm, 1);
+	reg->dirty = true;
+
 	reg = armv8_reg_current(arm, 0);
 	reg->dirty = true;
 
-	/*  clear any abort  */
-	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap, armv8->debug_base + CPUDBG_DRCR, 1<<2);
+	/*	clear any abort  */
+	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap, armv8->debug_base + CPUV8_DBG_DRCR, 1<<2);
 	if (retval != ERROR_OK)
 		return retval;
 
 	/* This algorithm comes from either :
-	 * Cortex-A8 TRM Example 12-25
+	 * Cortex-A TRM Example 12-25
 	 * Cortex-R4 TRM Example 11-26
 	 * (slight differences)
 	 */
@@ -1731,61 +1877,59 @@ static int aarch64_write_apb_ab_memory(struct target *target,
 
 	/* Read DSCR */
 	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_DSCR, &dscr);
+			armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
 	if (retval != ERROR_OK)
 		goto error_free_buff_w;
 
-	/* Set DTR mode to Fast (2) */
-	dscr = (dscr & ~DSCR_EXT_DCC_MASK) | DSCR_EXT_DCC_FAST_MODE;
+	/* Set DTR mode to Normal*/
+	dscr = (dscr & ~DSCR_MA);
 	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_DSCR, dscr);
+			armv8->debug_base + CPUV8_DBG_DSCR, dscr);
 	if (retval != ERROR_OK)
 		goto error_free_buff_w;
 
-	/* Copy the destination address into R0 */
-	/*  - pend an instruction  MRC p14, 0, R0, c5, c0 */
-	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-				armv8->debug_base + CPUDBG_ITR, ARMV4_5_MRC(14, 0, 0, 0, 5, 0));
-	if (retval != ERROR_OK)
-		goto error_unset_dtr_w;
-	/* Write address into DTRRX, which triggers previous instruction */
-	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-				armv8->debug_base + CPUDBG_DTRRX, address & (~0x3));
-	if (retval != ERROR_OK)
-		goto error_unset_dtr_w;
+	/* Write X0 with value 'address' using write procedure */
+	/*	 - Write the address for read access into DTRRX */
+	retval += mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_DTRRX, address & ~0x3);
+	/*	- Copy value from DTRRX to R0 using instruction mrs DCCRX, x0 */
+	aarch64_exec_opcode(target, ARMV8_MRS(SYSTEM_DBG_DTRRX_EL0, 0), &dscr);
 
-	/* Write the data transfer instruction into the ITR
-	 * (STC p14, c5, [R0], 4)
+	/* change DCC to memory mode
+	 * in one combined write (since they are adjacent registers)
 	 */
-	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-				armv8->debug_base + CPUDBG_ITR, ARMV4_5_STC(0, 1, 0, 1, 14, 5, 0, 4));
+	dscr = (dscr & ~DSCR_MA) | DSCR_MA;
+	retval +=  mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_DSCR, dscr);
+
 	if (retval != ERROR_OK)
 		goto error_unset_dtr_w;
+
 
 	/* Do the write */
 	retval = mem_ap_sel_write_buf_noincr(swjdp, armv8->debug_ap,
-					tmp_buff, 4, total_u32, armv8->debug_base + CPUDBG_DTRRX);
+					tmp_buff, 4, total_u32, armv8->debug_base + CPUV8_DBG_DTRRX);
 	if (retval != ERROR_OK)
 		goto error_unset_dtr_w;
 
 
-	/* Switch DTR mode back to non-blocking (0) */
-	dscr = (dscr & ~DSCR_EXT_DCC_MASK) | DSCR_EXT_DCC_NON_BLOCKING;
+	/* Switch DTR mode back to Normal mode */
+	dscr = (dscr & ~DSCR_MA);
 	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-				armv8->debug_base + CPUDBG_DSCR, dscr);
+				armv8->debug_base + CPUV8_DBG_DSCR, dscr);
 	if (retval != ERROR_OK)
 		goto error_unset_dtr_w;
 
-    /* Check for sticky abort flags in the DSCR */
+	/* Check for sticky abort flags in the DSCR */
 	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-				armv8->debug_base + CPUDBG_DSCR, &dscr);
+				armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
 	if (retval != ERROR_OK)
 		goto error_free_buff_w;
-	if (dscr & (DSCR_STICKY_ABORT_PRECISE | DSCR_STICKY_ABORT_IMPRECISE)) {
+	if (dscr & (DSCR_ERR | DSCR_SYS_ERROR_PEND)) {
 		/* Abort occurred - clear it and exit */
 		LOG_ERROR("abort occurred - dscr = 0x%08" PRIx32, dscr);
 		mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-					armv8->debug_base + CPUDBG_DRCR, 1<<2);
+					armv8->debug_base + CPUV8_DBG_DRCR, 1<<2);
 		goto error_free_buff_w;
 	}
 
@@ -1796,98 +1940,168 @@ static int aarch64_write_apb_ab_memory(struct target *target,
 error_unset_dtr_w:
 	/* Unset DTR mode */
 	mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-				armv8->debug_base + CPUDBG_DSCR, &dscr);
-	dscr = (dscr & ~DSCR_EXT_DCC_MASK) | DSCR_EXT_DCC_NON_BLOCKING;
+				armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
+	dscr = (dscr & ~DSCR_MA);
 	mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-				armv8->debug_base + CPUDBG_DSCR, dscr);
+				armv8->debug_base + CPUV8_DBG_DSCR, dscr);
 error_free_buff_w:
 	LOG_ERROR("error");
 	free(tmp_buff);
 	return ERROR_FAIL;
 }
 
+
 static int aarch64_read_apb_ab_memory(struct target *target,
-	uint64_t address, uint32_t size,
+	uint32_t address, uint32_t size,
 	uint32_t count, uint8_t *buffer)
 {
 	/* read memory through APB-AP */
-
 	int retval = ERROR_COMMAND_SYNTAX_ERROR;
 	struct armv8_common *armv8 = target_to_armv8(target);
 	struct adiv5_dap *swjdp = armv8->arm.dap;
 	struct arm *arm = &armv8->arm;
+	int total_bytes = count * size;
+	int total_u32;
+	int start_byte = address & 0x3;
+	int end_byte   = (address + total_bytes) & 0x3;
 	struct reg *reg;
-	uint32_t dscr, val;
+	uint32_t dscr;
 	uint8_t *tmp_buff = NULL;
+	uint8_t *u8buf_ptr;
 
-	LOG_DEBUG("Reading APB-AP memory address 0x%" PRIx64 " size %"  PRIu32 " count%"  PRIu32,
+	LOG_DEBUG("Reading APB-AP memory address 0x%" PRIx32 " size %"	PRIu32 " count%"  PRIu32,
 			  address, size, count);
 	if (target->state != TARGET_HALTED) {
 		LOG_WARNING("target not halted");
 		return ERROR_TARGET_NOT_HALTED;
 	}
 
-	/* Mark register R0 as dirty, as it will be used
+	total_u32 = DIV_ROUND_UP((address & 3) + total_bytes, 4);
+	/* Mark register X0, X1 as dirty, as it will be used
 	 * for transferring the data.
 	 * It will be restored automatically when exiting
 	 * debug mode
 	 */
+	reg = armv8_reg_current(arm, 1);
+	reg->dirty = true;
+
 	reg = armv8_reg_current(arm, 0);
 	reg->dirty = true;
 
-	/*  clear any abort  */
+	/*	clear any abort  */
 	retval =
-		mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap, armv8->debug_base + CPUDBG_DRCR, 1<<2);
+		mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap, armv8->debug_base + CPUV8_DBG_DRCR, 1<<2);
 	if (retval != ERROR_OK)
 		goto error_free_buff_r;
 
+	/* Read DSCR */
 	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_DSCR, &dscr);
+			armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
+
+	/* This algorithm comes from either :
+	 * Cortex-A TRM Example 12-24
+	 * Cortex-R4 TRM Example 11-25
+	 * (slight differences)
+	 */
+
+	/* Set Normal access mode  */
+	dscr = (dscr & ~DSCR_MA);
+	retval +=  mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_DSCR, dscr);
+
+	/* Write X0 with value 'address' using write procedure */
+	/*	 - Write the address for read access into DTRRX */
+	retval += mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_DTRRX, address & ~0x3);
+	/*	- Copy value from DTRRX to R0 using instruction mrs DCCRX, x0 */
+	aarch64_exec_opcode(target, ARMV8_MRS(SYSTEM_DBG_DTRRX_EL0, 0), &dscr);
+
+	/* change DCC to memory mode
+	 * in one combined write (since they are adjacent registers)
+	 */
+	dscr = (dscr & ~DSCR_MA)|DSCR_MA;
+	retval +=  mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_DSCR, dscr);
 	if (retval != ERROR_OK)
 		goto error_unset_dtr_r;
 
-	if (size > 4) {
-		LOG_WARNING("reading size >4 bytes not yet supported");
-		goto error_unset_dtr_r;
+	/* Optimize the read as much as we can, either way we read in a single pass  */
+	if ((start_byte) || (end_byte)) {
+		/* The algorithm only copies 32 bit words, so the buffer
+		 * should be expanded to include the words at either end.
+		 * The first and last words will be read into a temp buffer
+		 * to avoid corruption
+		 */
+		tmp_buff = malloc(total_u32 * 4);
+		if (!tmp_buff)
+			goto error_unset_dtr_r;
+
+		/* use the tmp buffer to read the entire data */
+		u8buf_ptr = tmp_buff;
+	} else
+		/* address and read length are aligned so read directely into the passed buffer */
+		u8buf_ptr = buffer;
+
+	/* Read the data - Each read of the DTRTX register causes the instruction to be reissued
+	 * Abort flags are sticky, so can be read at end of transactions
+	 *
+	 * This data is read in aligned to 32 bit boundary.
+	 */
+	retval = mem_ap_sel_read_buf_noincr(swjdp, armv8->debug_ap, u8buf_ptr, 4, total_u32,
+									armv8->debug_base + CPUV8_DBG_DTRTX);
+	if (retval != ERROR_OK)
+			goto error_unset_dtr_r;
+
+	/* set DTR access mode back to Normal mode	*/
+	dscr = (dscr & ~DSCR_MA);
+	retval =  mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+					armv8->debug_base + CPUV8_DBG_DSCR, dscr);
+	if (retval != ERROR_OK)
+		goto error_free_buff_r;
+
+	/* Wait for the final read instruction to finish */
+	do {
+		retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
+					armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
+		if (retval != ERROR_OK)
+			goto error_free_buff_r;
+	} while ((dscr & DSCR_ITE) == 0);
+
+	/* Check for sticky abort flags in the DSCR */
+	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
+				armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
+	if (retval != ERROR_OK)
+		goto error_free_buff_r;
+	if (dscr & (DSCR_ERR | DSCR_SYS_ERROR_PEND)) {
+		/* Abort occurred - clear it and exit */
+		LOG_ERROR("abort occurred - dscr = 0x%08" PRIx32, dscr);
+		mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+					armv8->debug_base + CPUV8_DBG_DRCR, 1<<2);
+		goto error_free_buff_r;
 	}
-	if (count > 1) {
-		LOG_WARNING("reading multiple of bytes not yet supported");
-		goto error_unset_dtr_r;
+
+	/* check if we need to copy aligned data by applying any shift necessary */
+	if (tmp_buff) {
+		memcpy(buffer, tmp_buff + start_byte, total_bytes);
+		free(tmp_buff);
 	}
-
-	retval = aarch64_instr_write_data_dcc_64(arm->dpm, 0xd5330400, address+4);
-	if (retval != ERROR_OK)
-		goto error_unset_dtr_r;
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_DSCR, &dscr);
-
-	dscr = DSCR_INSTR_COMP;
-	retval = aarch64_exec_opcode(target, 0xb85fc000, &dscr);
-	if (retval != ERROR_OK)
-		goto error_unset_dtr_r;
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_DSCR, &dscr);
-
-	retval = aarch64_instr_read_data_dcc(arm->dpm, 0xd5130400, &val);
-	if (retval != ERROR_OK)
-		goto error_unset_dtr_r;
-	memcpy(buffer, &val, size);
-
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_DSCR, &dscr);
 
 	/* Done */
 	return ERROR_OK;
 
 error_unset_dtr_r:
-	LOG_WARNING("DSCR = 0x%" PRIx32, dscr);
-	/* Todo: Unset DTR mode */
-
+	/* Unset DTR mode */
+	mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
+				armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
+	dscr = (dscr & ~DSCR_MA);
+	mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+				armv8->debug_base + CPUV8_DBG_DSCR, dscr);
 error_free_buff_r:
 	LOG_ERROR("error");
 	free(tmp_buff);
 	return ERROR_FAIL;
 }
+
 
 
 /*
@@ -2053,11 +2267,9 @@ static int aarch64_write_phys_memory(struct target *target,
 		} else {
 
 			/* write memory through APB-AP */
-			if (!armv8->is_armv7r) {
-				retval = aarch64_mmu_modify(target, 0);
-				if (retval != ERROR_OK)
-					return retval;
-			}
+			retval = aarch64_mmu_modify(target, 0);
+			if (retval != ERROR_OK)
+				return retval;
 			return aarch64_write_apb_ab_memory(target, address, size, count, buffer);
 		}
 	}
@@ -2075,7 +2287,7 @@ static int aarch64_write_phys_memory(struct target *target,
 		 * wrong addresses will be invalidated!
 		 *
 		 * For both ICache and DCache, walk all cache lines in the
-		 * address range. Cortex-A8 has fixed 64 byte line length.
+		 * address range. Cortex-A has fixed 64 byte line length.
 		 *
 		 * REVISIT per ARMv7, these may trigger watchpoints ...
 		 */
@@ -2084,14 +2296,14 @@ static int aarch64_write_phys_memory(struct target *target,
 		if (armv8->armv8_mmu.armv8_cache.i_cache_enabled) {
 			/* ICIMVAU - Invalidate Cache single entry
 			 * with MVA to PoU
-			 *      MCR p15, 0, r0, c7, c5, 1
+			 *		MCR p15, 0, r0, c7, c5, 1
 			 */
-			for (uint32_t cacheline = address;
-				cacheline < address + size * count;
+			for (uint32_t cacheline = 0;
+				cacheline < size * count;
 				cacheline += 64) {
 				retval = dpm->instr_write_data_r0(dpm,
-						ARMV4_5_MCR(15, 0, 0, 7, 5, 1),
-						cacheline);
+						ARMV8_MSR_GP(SYSTEM_ICIVAU, 0),
+						address + cacheline);
 				if (retval != ERROR_OK)
 					return retval;
 			}
@@ -2101,14 +2313,14 @@ static int aarch64_write_phys_memory(struct target *target,
 		if (armv8->armv8_mmu.armv8_cache.d_u_cache_enabled) {
 			/* DCIMVAC - Invalidate data Cache line
 			 * with MVA to PoC
-			 *      MCR p15, 0, r0, c7, c6, 1
+			 *		MCR p15, 0, r0, c7, c6, 1
 			 */
-			for (uint32_t cacheline = address;
-				cacheline < address + size * count;
+			for (uint32_t cacheline = 0;
+				cacheline < size * count;
 				cacheline += 64) {
 				retval = dpm->instr_write_data_r0(dpm,
-						ARMV4_5_MCR(15, 0, 0, 7, 6, 1),
-						cacheline);
+						ARMV8_MSR_GP(SYSTEM_DCCVAU, 0),
+						address + cacheline);
 				if (retval != ERROR_OK)
 					return retval;
 			}
@@ -2119,6 +2331,7 @@ static int aarch64_write_phys_memory(struct target *target,
 
 	return retval;
 }
+
 
 static int aarch64_write_memory(struct target *target, uint32_t address,
 	uint32_t size, uint32_t count, const uint8_t *buffer)
@@ -2188,16 +2401,16 @@ static int aarch64_handle_target_request(void *priv)
 		uint32_t request;
 		uint32_t dscr;
 		retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-				armv8->debug_base + CPUDBG_DSCR, &dscr);
+				armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
 
 		/* check if we have data */
 		while ((dscr & DSCR_DTR_TX_FULL) && (retval == ERROR_OK)) {
 			retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-					armv8->debug_base + CPUDBG_DTRTX, &request);
+					armv8->debug_base + CPUV8_DBG_DTRTX, &request);
 			if (retval == ERROR_OK) {
 				target_request(target, request);
 				retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-						armv8->debug_base + CPUDBG_DSCR, &dscr);
+						armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
 			}
 		}
 	}
@@ -2212,7 +2425,9 @@ static int aarch64_examine_first(struct target *target)
 	struct adiv5_dap *swjdp = armv8->arm.dap;
 	int i;
 	int retval = ERROR_OK;
-	uint32_t debug, ctypr, ttypr, cpuid;
+	uint64_t debug, ttypr, cpuid;
+	uint32_t tmp0, tmp1;
+	debug = ttypr = cpuid = 0;
 
 	/* We do one extra read to ensure DAP is configured,
 	 * we call ahbap_debugport_init(swjdp) instead
@@ -2256,55 +2471,67 @@ static int aarch64_examine_first(struct target *target)
 	} else
 		armv8->debug_base = target->dbgbase;
 
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x90, &cpuid);
-	LOG_DEBUG("0x90 = %x", cpuid);
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x88, &cpuid);
-	LOG_DEBUG("0x88 = %x", cpuid);
+	LOG_DEBUG("Target ctibase is 0x%x", target->ctibase);
+	if (target->ctibase == 0)
+		armv8->cti_base = target->ctibase = armv8->debug_base + 0x1000;
+	else
+		armv8->cti_base = target->ctibase;
 
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x314, &cpuid);
-	LOG_DEBUG("0x314 = %x", cpuid);
+	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_LOCKACCESS, 0xC5ACCE55);
+	if (retval != ERROR_OK) {
+		LOG_DEBUG("LOCK debug access fail");
+		return retval;
+	}
 
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x310, &cpuid);
-	LOG_DEBUG("0x310 = %x", cpuid);
+	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->cti_base + CTI_UNLOCK , 0xC5ACCE55);
 	if (retval != ERROR_OK)
 		return retval;
 
+	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_OSLAR, 0);
+	if (retval != ERROR_OK) {
+		LOG_DEBUG("Examine %s failed", "oslock");
+		return retval;
+	}
+
 	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_CPUID, &cpuid);
+			armv8->debug_base + CPUV8_DBG_MAINID0, &tmp0);
+	retval += mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_MAINID0 + 4, &tmp1);
 	if (retval != ERROR_OK) {
 		LOG_DEBUG("Examine %s failed", "CPUID");
 		return retval;
 	}
+	cpuid |= tmp1;
+	cpuid = (cpuid << 32) | tmp0;
 
 	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_CTYPR, &ctypr);
+			armv8->debug_base + CPUV8_DBG_MEMFEATURE0, &tmp0);
+	retval += mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_MEMFEATURE0 + 4, &tmp1);
 	if (retval != ERROR_OK) {
-		LOG_DEBUG("Examine %s failed", "CTYPR");
+		LOG_DEBUG("Examine %s failed", "Memory Model Type");
 		return retval;
 	}
+	ttypr |= tmp1;
+	ttypr = (ttypr << 32) | tmp0;
 
 	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUDBG_TTYPR, &ttypr);
-	if (retval != ERROR_OK) {
-		LOG_DEBUG("Examine %s failed", "TTYPR");
-		return retval;
-	}
-
-	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + ID_AA64DFR0_EL1, &debug);
+			armv8->debug_base + CPUV8_DBG_DBGFEATURE0, &tmp0);
+	retval += mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_DBGFEATURE0 + 4, &tmp1);
 	if (retval != ERROR_OK) {
 		LOG_DEBUG("Examine %s failed", "ID_AA64DFR0_EL1");
 		return retval;
 	}
+	debug |= tmp1;
+	debug = (debug << 32) | tmp0;
 
-	LOG_DEBUG("cpuid = 0x%08" PRIx32, cpuid);
-	LOG_DEBUG("ctypr = 0x%08" PRIx32, ctypr);
-	LOG_DEBUG("ttypr = 0x%08" PRIx32, ttypr);
-	LOG_DEBUG("ID_AA64DFR0_EL1 = 0x%08" PRIx32, debug);
+	LOG_DEBUG("cpuid = 0x%08" PRIx64, cpuid);
+	LOG_DEBUG("ttypr = 0x%08" PRIx64, ttypr);
+	LOG_DEBUG("debug = 0x%08" PRIx64, debug);
 
 	armv8->arm.core_type = ARM_MODE_MON;
 	retval = aarch64_dpm_setup(aarch64, debug);
@@ -2312,13 +2539,8 @@ static int aarch64_examine_first(struct target *target)
 		return retval;
 
 	/* Setup Breakpoint Register Pairs */
-	aarch64->brp_num = ((debug >> 12) & 0x0F) + 1;
-	aarch64->brp_num_context = ((debug >> 28) & 0x0F) + 1;
-
-	/* hack - no bpt support yet */
-	aarch64->brp_num = 0;
-	aarch64->brp_num_context = 0;
-
+	aarch64->brp_num = (uint32_t)((debug >> 12) & 0x0F) + 1;
+	aarch64->brp_num_context = (uint32_t)((debug >> 28) & 0x0F) + 1;
 	aarch64->brp_num_available = aarch64->brp_num;
 	aarch64->brp_list = calloc(aarch64->brp_num, sizeof(struct aarch64_brp));
 	for (i = 0; i < aarch64->brp_num; i++) {
@@ -2445,12 +2667,8 @@ static int aarch64_virt2phys(struct target *target,
 		if (retval != ERROR_OK)
 			goto done;
 		*phys = ret;
-	} else {/*  use this method if armv8->memory_ap not selected
-		 *  mmu must be enable in order to get a correct translation */
-		retval = aarch64_mmu_modify(target, 1);
-		if (retval != ERROR_OK)
-			goto done;
-		retval = armv8_mmu_translate_va_pa(target, virt,  phys, 1);
+	} else {
+		LOG_ERROR("AAR64 processor not support translate va to pa");
 	}
 done:
 	return retval;
@@ -2591,6 +2809,7 @@ static const struct command_registration aarch64_command_handlers[] = {
 
 struct target_type aarch64_target = {
 	.name = "aarch64",
+	.pc_size = 64,
 
 	.poll = aarch64_poll,
 	.arch_state = armv8_arch_state,

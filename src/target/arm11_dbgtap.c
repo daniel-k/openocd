@@ -1179,7 +1179,7 @@ int arm11_dpm_init(struct arm11_common *arm11, uint32_t didr)
 	dpm->bpwp_enable = arm11_bpwp_enable;
 	dpm->bpwp_disable = arm11_bpwp_disable;
 
-	retval = arm_dpm_setup(dpm, 32);
+	retval = arm_dpm_setup(dpm);
 	if (retval != ERROR_OK)
 		return retval;
 

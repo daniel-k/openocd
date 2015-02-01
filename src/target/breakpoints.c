@@ -26,6 +26,8 @@
 #endif
 
 #include "target.h"
+#include "target_type.h"
+
 #include <helper/log.h>
 #include "breakpoints.h"
 
@@ -44,7 +46,7 @@ static const char * const watchpoint_rw_strings[] = {
 static int bpwp_unique_id;
 
 int breakpoint_add_internal(struct target *target,
-	uint32_t address,
+	uint64_t address,
 	uint32_t length,
 	enum breakpoint_type type)
 {
@@ -62,7 +64,7 @@ int breakpoint_add_internal(struct target *target,
 			 * breakpoint" ... check all the parameters before
 			 * succeeding.
 			 */
-			LOG_DEBUG("Duplicate Breakpoint address: 0x%08" PRIx32 " (BP %" PRIu32 ")",
+			LOG_DEBUG("Duplicate Breakpoint address: 0x%08" PRIx64 " (BP %" PRIu32 ")",
 				address, breakpoint->unique_id);
 			return ERROR_OK;
 		}
@@ -71,7 +73,10 @@ int breakpoint_add_internal(struct target *target,
 	}
 
 	(*breakpoint_p) = malloc(sizeof(struct breakpoint));
-	(*breakpoint_p)->address = address;
+	if (target->type->pc_size == 64)
+		(*breakpoint_p)->address_64 = address;
+	else
+		(*breakpoint_p)->address = (uint32_t)address;
 	(*breakpoint_p)->asid = 0;
 	(*breakpoint_p)->length = length;
 	(*breakpoint_p)->type = type;
@@ -100,9 +105,9 @@ fail:
 			return retval;
 	}
 
-	LOG_DEBUG("added %s breakpoint at 0x%8.8" PRIx32 " of length 0x%8.8x, (BPID: %" PRIu32 ")",
+	LOG_DEBUG("added %s breakpoint at 0x%8.8" PRIx64 " of length 0x%8.8x, (BPID: %" PRIu32 ")",
 		breakpoint_type_strings[(*breakpoint_p)->type],
-		(*breakpoint_p)->address, (*breakpoint_p)->length,
+		(target->type->pc_size == 64) ? (*breakpoint_p)->address_64 : (*breakpoint_p)->address, (*breakpoint_p)->length,
 		(*breakpoint_p)->unique_id);
 
 	return ERROR_OK;
@@ -161,7 +166,7 @@ int context_breakpoint_add_internal(struct target *target,
 }
 
 int hybrid_breakpoint_add_internal(struct target *target,
-	uint32_t address,
+	uint64_t address,
 	uint32_t asid,
 	uint32_t length,
 	enum breakpoint_type type)
@@ -181,8 +186,9 @@ int hybrid_breakpoint_add_internal(struct target *target,
 			LOG_DEBUG("Duplicate Hybrid Breakpoint asid: 0x%08" PRIx32 " (BP %" PRIu32 ")",
 				asid, breakpoint->unique_id);
 			return -1;
-		} else if ((breakpoint->address == address) && (breakpoint->asid == 0)) {
-			LOG_DEBUG("Duplicate Breakpoint IVA: 0x%08" PRIx32 " (BP %" PRIu32 ")",
+		} else if ((((breakpoint->address_64 == address)) || (breakpoint->address == ((uint32_t)address))) \
+				&& (breakpoint->asid == 0)) {
+			LOG_DEBUG("Duplicate Breakpoint IVA: 0x%08" PRIx64 " (BP %" PRIu32 ")",
 				address, breakpoint->unique_id);
 			return -1;
 
@@ -191,7 +197,10 @@ int hybrid_breakpoint_add_internal(struct target *target,
 		breakpoint = breakpoint->next;
 	}
 	(*breakpoint_p) = malloc(sizeof(struct breakpoint));
-	(*breakpoint_p)->address = address;
+	if (target->type->pc_size == 64)
+		(*breakpoint_p)->address_64 = address;
+	else
+		(*breakpoint_p)->address = (uint32_t)address;
 	(*breakpoint_p)->asid = asid;
 	(*breakpoint_p)->length = length;
 	(*breakpoint_p)->type = type;
@@ -210,9 +219,9 @@ int hybrid_breakpoint_add_internal(struct target *target,
 		return retval;
 	}
 	LOG_DEBUG(
-		"added %s Hybrid breakpoint at address 0x%8.8" PRIx32 " of length 0x%8.8x, (BPID: %" PRIu32 ")",
+		"added %s Hybrid breakpoint at address 0x%8.8" PRIx64 " of length 0x%8.8x, (BPID: %" PRIu32 ")",
 		breakpoint_type_strings[(*breakpoint_p)->type],
-		(*breakpoint_p)->address,
+		(target->type->pc_size == 64) ? (*breakpoint_p)->address_64 : (*breakpoint_p)->address,
 		(*breakpoint_p)->length,
 		(*breakpoint_p)->unique_id);
 
@@ -220,7 +229,7 @@ int hybrid_breakpoint_add_internal(struct target *target,
 }
 
 int breakpoint_add(struct target *target,
-	uint32_t address,
+	uint64_t address,
 	uint32_t length,
 	enum breakpoint_type type)
 {
@@ -265,7 +274,7 @@ int context_breakpoint_add(struct target *target,
 		return context_breakpoint_add_internal(target, asid, length, type);
 }
 int hybrid_breakpoint_add(struct target *target,
-	uint32_t address,
+	uint64_t address,
 	uint32_t asid,
 	uint32_t length,
 	enum breakpoint_type type)
@@ -312,17 +321,26 @@ static void breakpoint_free(struct target *target, struct breakpoint *breakpoint
 	free(breakpoint);
 }
 
-int breakpoint_remove_internal(struct target *target, uint32_t address)
+int breakpoint_remove_internal(struct target *target, uint64_t address)
 {
 	struct breakpoint *breakpoint = target->breakpoints;
 
 	while (breakpoint) {
-		if ((breakpoint->address == address) && (breakpoint->asid == 0))
-			break;
-		else if ((breakpoint->address == 0) && (breakpoint->asid == address))
-			break;
-		else if ((breakpoint->address == address) && (breakpoint->asid != 0))
-			break;
+		if (target->type->pc_size == 64) {
+			if ((breakpoint->address_64 == address) && (breakpoint->asid == 0))
+				break;
+			else if ((breakpoint->address_64 == 0) && (breakpoint->asid == ((uint32_t)address)))
+				break;
+			else if ((breakpoint->address_64 == address) && (breakpoint->asid != 0))
+				break;
+		} else {
+			if ((breakpoint->address == ((uint32_t)address)) && (breakpoint->asid == 0))
+				break;
+			else if ((breakpoint->address == 0) && (breakpoint->asid == ((uint32_t)address)))
+				break;
+			else if ((breakpoint->address == ((uint32_t)address)) && (breakpoint->asid != 0))
+				break;
+		}
 		breakpoint = breakpoint->next;
 	}
 
@@ -331,11 +349,11 @@ int breakpoint_remove_internal(struct target *target, uint32_t address)
 		return 1;
 	} else {
 		if (!target->smp)
-			LOG_ERROR("no breakpoint at address 0x%8.8" PRIx32 " found", address);
+			LOG_ERROR("no breakpoint at address 0x%8.8" PRIx64 " found", address);
 		return 0;
 	}
 }
-void breakpoint_remove(struct target *target, uint32_t address)
+void breakpoint_remove(struct target *target, uint64_t address)
 {
 	int found = 0;
 	if (target->smp) {
@@ -348,7 +366,7 @@ void breakpoint_remove(struct target *target, uint32_t address)
 			head = head->next;
 		}
 		if (found == 0)
-			LOG_ERROR("no breakpoint at address 0x%8.8" PRIx32 " found", address);
+			LOG_ERROR("no breakpoint at address 0x%8.8" PRIx64 " found", address);
 	} else
 		breakpoint_remove_internal(target, address);
 }
@@ -377,7 +395,7 @@ void breakpoint_clear_target(struct target *target)
 
 }
 
-struct breakpoint *breakpoint_find(struct target *target, uint32_t address)
+struct breakpoint *breakpoint_find(struct target *target, uint64_t address)
 {
 	struct breakpoint *breakpoint = target->breakpoints;
 

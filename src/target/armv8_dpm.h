@@ -10,15 +10,10 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the
- * Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
-#ifndef __ARM_DPM_H
-#define __ARM_DPM_H
+#ifndef __ARMV8_DPM_H
+#define __ARMV8_DPM_H
 
 /**
  * @file
@@ -61,13 +56,18 @@ struct arm_dpm {
 	struct arm *arm;
 
 	/** Cache of DIDR */
-	uint32_t didr;
+	uint64_t didr;
 
 	/** Invoke before a series of instruction operations */
 	int (*prepare)(struct arm_dpm *);
 
 	/** Invoke after a series of instruction operations */
 	int (*finish)(struct arm_dpm *);
+
+	/** Runs one instruction. */
+	int (*instr_execute)(struct arm_dpm *,
+			uint32_t opcode);
+
 
 	/* WRITE TO CPU */
 
@@ -78,6 +78,15 @@ struct arm_dpm {
 	/** Runs one instruction, writing data to R0 before execution. */
 	int (*instr_write_data_r0)(struct arm_dpm *,
 			uint32_t opcode, uint32_t data);
+
+
+	/** Runs one instruction, writing 64 bits data to DCC before execution. */
+	int (*instr_write_data_dcc_64)(struct arm_dpm *,
+			uint32_t opcode, uint64_t data);
+
+	/** Runs one instruction, writing 64-bits data to R0 before execution. */
+	int (*instr_write_data_r0_64)(struct arm_dpm *,
+			uint32_t opcode, uint64_t data);
 
 	/** Optional core-specific operation invoked after CPSR writes. */
 	int (*instr_cpsr_sync)(struct arm_dpm *dpm);
@@ -91,6 +100,14 @@ struct arm_dpm {
 	/** Runs one instruction, reading data from r0 after execution. */
 	int (*instr_read_data_r0)(struct arm_dpm *,
 			uint32_t opcode, uint32_t *data);
+
+	/** Runs one instruction, reading data from dcc after execution. */
+	int (*instr_read_data_dcc_64)(struct arm_dpm *,
+			uint32_t opcode, uint64_t *data);
+
+	/** Runs one instruction, reading data from r0 after execution. */
+	int (*instr_read_data_r0_64)(struct arm_dpm *,
+			uint32_t opcode, uint64_t *data);
 
 	/* BREAKPOINT/WATCHPOINT SUPPORT */
 
@@ -121,7 +138,7 @@ struct arm_dpm {
 	struct dpm_wp *dwp;
 
 	/** Address of the instruction which triggered a watchpoint. */
-	uint32_t wp_pc;
+	uint64_t wp_pc;
 
 	/** Recent value of DSCR. */
 	uint32_t dscr;
@@ -129,60 +146,65 @@ struct arm_dpm {
 	/* FIXME -- read/write DCSR methods and symbols */
 };
 
-int arm_dpm_setup(struct arm_dpm *dpm);
-int arm_dpm_initialize(struct arm_dpm *dpm);
+int armv8_dpm_setup(struct arm_dpm *dpm);
+int armv8_dpm_initialize(struct arm_dpm *dpm);
 
-int arm_dpm_read_current_registers(struct arm_dpm *);
-int dpm_modeswitch(struct arm_dpm *dpm, enum arm_mode mode);
+int armv8_dpm_read_current_registers(struct arm_dpm *);
+int dpmv8_modeswitch(struct arm_dpm *dpm, enum arm_mode mode);
 
 
-int arm_dpm_write_dirty_registers(struct arm_dpm *, bool bpwp);
+int armv8_dpm_write_dirty_registers(struct arm_dpm *, bool bpwp);
 
-void arm_dpm_report_wfar(struct arm_dpm *, uint32_t wfar);
+void armv8_dpm_report_wfar(struct arm_dpm *, uint64_t wfar);
 
 /* DSCR bits; see ARMv7a arch spec section C10.3.1.
  * Not all v7 bits are valid in v6.
  */
-#define DSCR_CORE_HALTED            (0x1 <<  0)
-#define DSCR_CORE_RESTARTED         (0x1 <<  1)
-#define DSCR_ENTRY_MASK             (0xF <<  2)
-#define DSCR_STICKY_ABORT_PRECISE   (0x1 <<  6)
-#define DSCR_STICKY_ABORT_IMPRECISE (0x1 <<  7)
-#define DSCR_STICKY_UNDEFINED       (0x1 <<  8)
-#define DSCR_DBG_NOPWRDWN           (0x1 <<  9) /* v6 only */
-#define DSCR_DBG_ACK                (0x1 << 10)
-#define DSCR_INT_DIS                (0x1 << 11)
-#define DSCR_CP14_USR_COMMS         (0x1 << 12)
-#define DSCR_ITR_EN                 (0x1 << 13)
-#define DSCR_HALT_DBG_MODE          (0x1 << 14)
-#define DSCR_MON_DBG_MODE           (0x1 << 15)
-#define DSCR_SEC_PRIV_INVASV_DIS    (0x1 << 16)
-#define DSCR_SEC_PRIV_NINVASV_DIS   (0x1 << 17)
+#define DSCR_DEBUG_STATUS_MASK		(0x1F <<  0)
+#define DSCR_ERR					(0x1 <<  6)
+#define DSCR_SYS_ERROR_PEND			(0x1 <<  7)
+#define DSCR_CUR_EL					(0x3 <<  8)
+#define DSCR_EL_STATUS_MASK			(0xF << 10)
+#define DSCR_HDE					(0x1 << 14)
+#define DSCR_SDD					(0x1 << 16)
 #define DSCR_NON_SECURE             (0x1 << 18)
-#define DSCR_DSCRD_IMPRECISE_ABORT  (0x1 << 19)
-#define DSCR_EXT_DCC_MASK           (0x3 << 20) /* DTR mode */  /* bits 22, 23 are reserved */
-#define DSCR_INSTR_COMP             (0x1 << 24)
+#define DSCR_MA						(0x1 << 20)
+#define DSCR_TDA					(0x1 << 21)
+#define DSCR_INTDIS_MASK			(0x3 << 22)
+#define DSCR_ITE					(0x1 << 24)
 #define DSCR_PIPE_ADVANCE           (0x1 << 25)
-#define DSCR_DTRTX_FULL_LATCHED     (0x1 << 26)
-#define DSCR_DTRRX_FULL_LATCHED     (0x1 << 27) /* bit 28 is reserved */
+#define DSCR_TXU					(0x1 << 26)
+#define DSCR_RTO					(0x1 << 27) /* bit 28 is reserved */
+#define DSCR_ITO					(0x1 << 28)
 #define DSCR_DTR_TX_FULL            (0x1 << 29)
 #define DSCR_DTR_RX_FULL            (0x1 << 30) /* bit 31 is reserved */
 
-#define DSCR_ENTRY(dscr)            (((dscr) >> 2) & 0xf)
-#define DSCR_RUN_MODE(dscr)         ((dscr) & (DSCR_CORE_HALTED | DSCR_CORE_RESTARTED))
 
 
 /* Methods of entry into debug mode */
-#define DSCR_ENTRY_HALT_REQ           (0x0 << 2)
-#define DSCR_ENTRY_BREAKPOINT         (0x1 << 2)
-#define DSCR_ENTRY_IMPRECISE_WATCHPT  (0x2 << 2)
-#define DSCR_ENTRY_BKPT_INSTR         (0x3 << 2)
-#define DSCR_ENTRY_EXT_DBG_REQ        (0x4 << 2)
-#define DSCR_ENTRY_VECT_CATCH         (0x5 << 2)
-#define DSCR_ENTRY_D_SIDE_ABORT       (0x6 << 2)  /* v6 only */
-#define DSCR_ENTRY_I_SIDE_ABORT       (0x7 << 2)  /* v6 only */
-#define DSCR_ENTRY_OS_UNLOCK          (0x8 << 2)
-#define DSCR_ENTRY_PRECISE_WATCHPT    (0xA << 2)
+#define DSCR_NON_DEBUG			(0x2)
+#define DSCR_RESTARTING			(0x1)
+#define DSCR_BKPT				(0x7)
+#define DSCR_EXT_DEBUG			(0x13)
+#define DSCR_HALT_STEP_NORMAL	(0x1B)
+#define DSCR_HALT_STEP_EXECLU	(0x1F)
+#define DSCR_OS_UNLOCK			(0x23)
+#define DSCR_RESET_CATCH		(0x27)
+#define DSCR_WATCHPOINT			(0x2B)
+#define DSCR_HLT				(0x2F)
+#define DSCR_SW_ACCESS_DBG		(0x33)
+#define DSCR_EXCEPTION_CATCH	(0x37)
+#define DSCR_HALT_STEP			(0x3B)
+#define DSCR_HALT_MASK			(0x3C)
+
+#define DSCR_ENTRY(dscr)            ((dscr) & 0x3)
+#define DSCR_RUN_MODE(dscr)         ((dscr) & (DSCR_HALT_MASK))
+
+/*DRCR registers*/
+#define DRCR_CSE				(1 << 2)
+#define DRCR_CSPA				(1 << 3)
+#define DRCR_CBRRQ				(1 << 4)
+
 
 /* DTR modes */
 #define DSCR_EXT_DCC_NON_BLOCKING     (0x0 << 20)
@@ -190,14 +212,27 @@ void arm_dpm_report_wfar(struct arm_dpm *, uint32_t wfar);
 #define DSCR_EXT_DCC_FAST_MODE        (0x2 << 20)  /* bits 22, 23 are reserved */
 
 
-
-
-
 /* DRCR (debug run control register) bits */
 #define DRCR_HALT				(1 << 0)
 #define DRCR_RESTART			(1 << 1)
 #define DRCR_CLEAR_EXCEPTIONS	(1 << 2)
 
-void arm_dpm_report_dscr(struct arm_dpm *dpm, uint32_t dcsr);
+/* PRCR (processor debug status register) bits */
+#define PRSR_PU					(1 << 0)
+#define PRSR_SPD				(1 << 1)
+#define PRSR_RESET				(1 << 2)
+#define PRSR_SR					(1 << 3)
+#define PRSR_HALT				(1 << 4)
+#define PRSR_OSLK				(1 << 5)
+#define PRSR_DLK				(1 << 6)
+#define PRSR_EDAD				(1 << 7)
+#define PRSR_SDAD				(1 << 8)
+#define PRSR_EPMAD				(1 << 9)
+#define PRSR_SPMAD				(1 << 10)
+#define PRSR_SDR				(1 << 11)
+
+
+
+void armv8_dpm_report_dscr(struct arm_dpm *dpm, uint32_t dcsr);
 
 #endif /* __ARM_DPM_H */

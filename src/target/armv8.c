@@ -33,9 +33,108 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "arm_opcodes.h"
+#include "armv8_opcodes.h"
 #include "target.h"
 #include "target_type.h"
+
+static const char * const armv8_state_strings[] = {
+	"ARM", "Thumb", "Jazelle", "ThumbEE", "ARM64",
+};
+
+static const struct {
+	const char *name;
+	unsigned psr;
+	/* For user and system modes, these list indices for all registers.
+	 * otherwise they're just indices for the shadow registers and SPSR.
+	 */
+	unsigned short n_indices;
+	const uint8_t *indices;
+} armv8_mode_data[] = {
+	/* These special modes are currently only supported
+	 * by ARMv6M and ARMv7M profiles */
+	{
+		.name = "EL0T",
+		.psr = ARMV8_64_EL0T,
+	},
+	{
+		.name = "EL1T",
+		.psr = ARMV8_64_EL1T,
+	},
+	{
+		.name = "EL1H",
+		.psr = ARMV8_64_EL1H,
+	},
+	{
+		.name = "EL2T",
+		.psr = ARMV8_64_EL2T,
+	},
+	{
+		.name = "EL2H",
+		.psr = ARMV8_64_EL2H,
+	},
+	{
+		.name = "EL3T",
+		.psr = ARMV8_64_EL3T,
+	},
+	{
+		.name = "EL3H",
+		.psr = ARMV8_64_EL3H,
+	},
+};
+
+/** Map PSR mode bits to the name of an ARM processor operating mode. */
+const char *armv8_mode_name(unsigned psr_mode)
+{
+	for (unsigned i = 0; i < ARRAY_SIZE(armv8_mode_data); i++) {
+		if (armv8_mode_data[i].psr == psr_mode)
+			return armv8_mode_data[i].name;
+	}
+	LOG_ERROR("unrecognized psr mode: %#02x", psr_mode);
+	return "UNRECOGNIZED";
+}
+
+int armv8_mode_to_number(enum arm_mode mode)
+{
+	switch (mode) {
+		case ARM_MODE_ANY:
+		/* map MODE_ANY to user mode */
+		case ARM_MODE_USR:
+			return 0;
+		case ARM_MODE_FIQ:
+			return 1;
+		case ARM_MODE_IRQ:
+			return 2;
+		case ARM_MODE_SVC:
+			return 3;
+		case ARM_MODE_ABT:
+			return 4;
+		case ARM_MODE_UND:
+			return 5;
+		case ARM_MODE_SYS:
+			return 6;
+		case ARM_MODE_MON:
+			return 7;
+		case ARMV8_64_EL0T:
+			return 8;
+		case ARMV8_64_EL1T:
+			return 9;
+		case ARMV8_64_EL1H:
+			return 10;
+		case ARMV8_64_EL2T:
+			return 11;
+		case ARMV8_64_EL2H:
+			return 12;
+		case ARMV8_64_EL3T:
+			return 13;
+		case ARMV8_64_EL3H:
+			return 14;
+
+		default:
+			LOG_ERROR("invalid mode value encountered %d", mode);
+			return -1;
+	}
+}
+
 
 static int armv8_read_core_reg(struct target *target, struct reg *r,
 	int num, enum arm_mode mode)
@@ -85,37 +184,201 @@ static int armv8_write_core_reg(struct target *target, struct reg *r,
 	return ERROR_OK;
 }
 #endif
+/**
+ * Configures host-side ARM records to reflect the specified CPSR.
+ * Later, code can use arm_reg_current() to map register numbers
+ * according to how they are exposed by this mode.
+ */
+void armv8_set_cpsr(struct arm *arm, uint32_t cpsr)
+{
+	uint32_t mode = cpsr & 0x1F;
+	int num;
+	/* NOTE:  this may be called very early, before the register
+	 * cache is set up.  We can't defend against many errors, in
+	 * particular against CPSRs that aren't valid *here* ...
+	 */
+	if (arm->cpsr) {
+		buf_set_u32(arm->cpsr->value, 0, 32, cpsr);
+		arm->cpsr->valid = 1;
+		arm->cpsr->dirty = 0;
+	}
+
+	/* Older ARMs won't have the J bit */
+	enum arm_state state = 0xFF;
+
+	if (((cpsr & 0x10) >> 4) == 0) {
+		state = ARM_STATE_AARCH64;
+	} else {
+		if (cpsr & (1 << 5)) {	/* T */
+			if (cpsr & (1 << 24)) { /* J */
+				LOG_WARNING("ThumbEE -- incomplete support");
+				state = ARM_STATE_THUMB_EE;
+			} else
+				state = ARM_STATE_THUMB;
+		} else {
+			if (cpsr & (1 << 24)) { /* J */
+				LOG_ERROR("Jazelle state handling is BROKEN!");
+				state = ARM_STATE_JAZELLE;
+			} else
+				state = ARM_STATE_ARM;
+		}
+	}
+	arm->core_state = state;
+	if (arm->core_state == ARM_STATE_AARCH64) {
+		switch (mode) {
+			case SYSTEM_AAR64_MODE_EL0t:
+				arm->core_mode = ARMV8_64_EL0T;
+			break;
+			case SYSTEM_AAR64_MODE_EL1t:
+				arm->core_mode = ARMV8_64_EL0T;
+			break;
+			case SYSTEM_AAR64_MODE_EL1h:
+				arm->core_mode = ARMV8_64_EL1H;
+			break;
+			case SYSTEM_AAR64_MODE_EL2t:
+				arm->core_mode = ARMV8_64_EL2T;
+			break;
+			case SYSTEM_AAR64_MODE_EL2h:
+				arm->core_mode = ARMV8_64_EL2H;
+			break;
+			case SYSTEM_AAR64_MODE_EL3t:
+				arm->core_mode = ARMV8_64_EL3T;
+			break;
+			case SYSTEM_AAR64_MODE_EL3h:
+				arm->core_mode = ARMV8_64_EL3H;
+			break;
+			default:
+				LOG_DEBUG("unknow mode 0x%x", (unsigned) (mode));
+			break;
+		}
+	} else {
+		arm->core_mode = mode;
+	}
+
+	num = armv8_mode_to_number(arm->core_mode);
+	if (num < 0) {
+		mode = ARM_MODE_USR;
+		num = 0;
+	}
+
+	LOG_DEBUG("set CPSR %#8.8x: %s mode, %s state", (unsigned) cpsr,
+		armv8_mode_name(arm->core_mode),
+		armv8_state_strings[arm->core_state]);
+}
 
 static void armv8_show_fault_registers(struct target *target)
 {
 	/* TODO */
 }
 
+static uint8_t armv8_pa_size(uint32_t ps)
+{
+	uint8_t ret = 0;
+	switch (ps) {
+		case 0:
+			ret = 32;
+			break;
+		case 1:
+			ret = 36;
+			break;
+		case 2:
+			ret = 40;
+			break;
+		case 3:
+			ret = 42;
+			break;
+		case 4:
+			ret = 44;
+			break;
+		case 5:
+			ret = 48;
+			break;
+		default:
+			LOG_INFO("Unknow physicall address size");
+			break;
+	}
+	return ret;
+}
+
 static int armv8_read_ttbcr(struct target *target)
 {
 	struct armv8_common *armv8 = target_to_armv8(target);
 	struct arm_dpm *dpm = armv8->arm.dpm;
+	struct arm *arm = &armv8->arm;
 	uint32_t ttbcr;
+	uint64_t ttbcr_64;
+
 	int retval = dpm->prepare(dpm);
 	if (retval != ERROR_OK)
 		goto done;
-	/*  MRC p15,0,<Rt>,c2,c0,2 ; Read CP15 Translation Table Base Control Register*/
-	retval = dpm->instr_read_data_r0(dpm,
-			ARMV4_5_MRC(15, 0, 0, 2, 0, 2),
-			&ttbcr);
+
+	/* claaer ttrr1_used and ttbr0_mask */
+	memset(&armv8->armv8_mmu.ttbr1_used, 0, sizeof(armv8->armv8_mmu.ttbr1_used));
+	memset(&armv8->armv8_mmu.ttbr0_mask, 0, sizeof(armv8->armv8_mmu.ttbr0_mask));
+
+	switch (arm->core_mode) {
+		case ARMV8_64_EL3H:
+		case ARMV8_64_EL3T:
+			retval = dpm->instr_read_data_r0(dpm,
+					ARMV8_MRS(SYSTEM_TCR_EL3, 0),
+					&ttbcr);
+			retval += dpm->instr_read_data_r0_64(dpm,
+					ARMV8_MRS(SYSTEM_TTBR0_EL3, 0),
+					&armv8->ttbr_base);
+			if (retval != ERROR_OK)
+				goto done;
+			armv8->va_size = 64 - (ttbcr & 0x3F);
+			armv8->pa_size = armv8_pa_size((ttbcr >> 16) & 7);
+			armv8->page_size = (ttbcr >> 14) & 3;
+			break;
+		case ARMV8_64_EL2T:
+		case ARMV8_64_EL2H:
+			retval = dpm->instr_read_data_r0(dpm,
+					ARMV8_MRS(SYSTEM_TCR_EL2, 0),
+					&ttbcr);
+			retval += dpm->instr_read_data_r0_64(dpm,
+					ARMV8_MRS(SYSTEM_TTBR0_EL2, 0),
+					&armv8->ttbr_base);
+			if (retval != ERROR_OK)
+				goto done;
+			armv8->va_size = 64 - (ttbcr & 0x3F);
+			armv8->pa_size = armv8_pa_size((ttbcr >> 16) & 7);
+			armv8->page_size = (ttbcr >> 14) & 3;
+			break;
+		case ARMV8_64_EL0T:
+		case ARMV8_64_EL1T:
+		case ARMV8_64_EL1H:
+			retval = dpm->instr_read_data_r0_64(dpm,
+					ARMV8_MRS(SYSTEM_TCR_EL1, 0),
+					&ttbcr_64);
+			armv8->va_size = 64 - (ttbcr_64 & 0x3F);
+			armv8->pa_size = armv8_pa_size((ttbcr_64 >> 32) & 7);
+			armv8->page_size = (ttbcr_64 >> 14) & 3;
+			armv8->armv8_mmu.ttbr1_used = (((ttbcr_64 >> 16) & 0x3F) != 0) ? 1 : 0;
+			armv8->armv8_mmu.ttbr0_mask  = 0x0000FFFFFFFFFFFF;
+			retval += dpm->instr_read_data_r0_64(dpm,
+					ARMV8_MRS(SYSTEM_TTBR0_EL1 | (armv8->armv8_mmu.ttbr1_used), 0),
+					&armv8->ttbr_base);
+			if (retval != ERROR_OK)
+				goto done;
+			break;
+		default:
+			LOG_ERROR("unknow core state");
+			retval = ERROR_FAIL;
+			break;
+	}
 	if (retval != ERROR_OK)
 		goto done;
-	armv8->armv8_mmu.ttbr1_used = ((ttbcr & 0x7) != 0) ? 1 : 0;
-	armv8->armv8_mmu.ttbr0_mask  = 7 << (32 - ((ttbcr & 0x7)));
+
 #if 0
-	LOG_INFO("ttb1 %s ,ttb0_mask %x",
+	LOG_INFO("ttb1 %s ,ttb0_mask %llx",
 		armv8->armv8_mmu.ttbr1_used ? "used" : "not used",
 		armv8->armv8_mmu.ttbr0_mask);
 #endif
 	if (armv8->armv8_mmu.ttbr1_used == 1) {
-		LOG_INFO("SVC access above %" PRIx32,
-			 (uint32_t)(0xffffffff & armv8->armv8_mmu.ttbr0_mask));
-		armv8->armv8_mmu.os_border = 0xffffffff & armv8->armv8_mmu.ttbr0_mask;
+		LOG_INFO("TTBR0 access above %" PRIx64,
+			 (uint64_t)(armv8->armv8_mmu.ttbr0_mask));
+		armv8->armv8_mmu.os_border = armv8->armv8_mmu.ttbr0_mask;
 	} else {
 		/*  fix me , default is hard coded LINUX border  */
 		armv8->armv8_mmu.os_border = 0xc0000000;
@@ -125,188 +388,32 @@ done:
 	return retval;
 }
 
+static int armv8_4K_translate(struct target *target,  uint32_t va, uint32_t *val)
+{
+	LOG_ERROR("4K page Address translation need to add");
+	return ERROR_FAIL;
+}
+
 
 /*  method adapted to cortex A : reused arm v4 v5 method*/
 int armv8_mmu_translate_va(struct target *target,  uint32_t va, uint32_t *val)
 {
-	uint32_t first_lvl_descriptor = 0x0;
-	uint32_t second_lvl_descriptor = 0x0;
-	int retval;
-	struct armv8_common *armv8 = target_to_armv8(target);
-	struct arm_dpm *dpm = armv8->arm.dpm;
-	uint32_t ttb = 0;	/*  default ttb0 */
-	if (armv8->armv8_mmu.ttbr1_used == -1)
-		armv8_read_ttbcr(target);
-	if ((armv8->armv8_mmu.ttbr1_used) &&
-		(va > (0xffffffff & armv8->armv8_mmu.ttbr0_mask))) {
-		/*  select ttb 1 */
-		ttb = 1;
-	}
-	retval = dpm->prepare(dpm);
-	if (retval != ERROR_OK)
-		goto done;
-
-	/*  MRC p15,0,<Rt>,c2,c0,ttb */
-	retval = dpm->instr_read_data_r0(dpm,
-			ARMV4_5_MRC(15, 0, 0, 2, 0, ttb),
-			&ttb);
-	if (retval != ERROR_OK)
-		return retval;
-	retval = armv8->armv8_mmu.read_physical_memory(target,
-			(ttb & 0xffffc000) | ((va & 0xfff00000) >> 18),
-			4, 1, (uint8_t *)&first_lvl_descriptor);
-	if (retval != ERROR_OK)
-		return retval;
-	first_lvl_descriptor = target_buffer_get_u32(target, (uint8_t *)
-			&first_lvl_descriptor);
-	/*  reuse armv4_5 piece of code, specific armv8 changes may come later */
-	LOG_DEBUG("1st lvl desc: %8.8" PRIx32 "", first_lvl_descriptor);
-
-	if ((first_lvl_descriptor & 0x3) == 0) {
-		LOG_ERROR("Address translation failure");
-		return ERROR_TARGET_TRANSLATION_FAULT;
-	}
-
-
-	if ((first_lvl_descriptor & 0x3) == 2) {
-		/* section descriptor */
-		*val = (first_lvl_descriptor & 0xfff00000) | (va & 0x000fffff);
-		return ERROR_OK;
-	}
-
-	if ((first_lvl_descriptor & 0x3) == 1) {
-		/* coarse page table */
-		retval = armv8->armv8_mmu.read_physical_memory(target,
-				(first_lvl_descriptor & 0xfffffc00) | ((va & 0x000ff000) >> 10),
-				4, 1, (uint8_t *)&second_lvl_descriptor);
-		if (retval != ERROR_OK)
-			return retval;
-	} else if ((first_lvl_descriptor & 0x3) == 3)   {
-		/* fine page table */
-		retval = armv8->armv8_mmu.read_physical_memory(target,
-				(first_lvl_descriptor & 0xfffff000) | ((va & 0x000ffc00) >> 8),
-				4, 1, (uint8_t *)&second_lvl_descriptor);
-		if (retval != ERROR_OK)
-			return retval;
-	}
-
-	second_lvl_descriptor = target_buffer_get_u32(target, (uint8_t *)
-			&second_lvl_descriptor);
-
-	LOG_DEBUG("2nd lvl desc: %8.8" PRIx32 "", second_lvl_descriptor);
-
-	if ((second_lvl_descriptor & 0x3) == 0) {
-		LOG_ERROR("Address translation failure");
-		return ERROR_TARGET_TRANSLATION_FAULT;
-	}
-
-	if ((second_lvl_descriptor & 0x3) == 1) {
-		/* large page descriptor */
-		*val = (second_lvl_descriptor & 0xffff0000) | (va & 0x0000ffff);
-		return ERROR_OK;
-	}
-
-	if ((second_lvl_descriptor & 0x3) == 2) {
-		/* small page descriptor */
-		*val = (second_lvl_descriptor & 0xfffff000) | (va & 0x00000fff);
-		return ERROR_OK;
-	}
-
-	if ((second_lvl_descriptor & 0x3) == 3) {
-		*val = (second_lvl_descriptor & 0xfffffc00) | (va & 0x000003ff);
-		return ERROR_OK;
-	}
-
-	/* should not happen */
-	LOG_ERROR("Address translation failure");
-	return ERROR_TARGET_TRANSLATION_FAULT;
-
-done:
-	return retval;
-}
-
-/*  V7 method VA TO PA  */
-int armv8_mmu_translate_va_pa(struct target *target, uint32_t va,
-	uint32_t *val, int meminfo)
-{
 	int retval = ERROR_FAIL;
 	struct armv8_common *armv8 = target_to_armv8(target);
 	struct arm_dpm *dpm = armv8->arm.dpm;
-	uint32_t virt = va & ~0xfff;
-	uint32_t NOS, NS, INNER, OUTER;
-	*val = 0xdeadbeef;
+
 	retval = dpm->prepare(dpm);
+	retval += armv8_read_ttbcr(target);
 	if (retval != ERROR_OK)
 		goto done;
-	/*  mmu must be enable in order to get a correct translation
-	 *  use VA to PA CP15 register for conversion */
-	retval = dpm->instr_write_data_r0(dpm,
-			ARMV4_5_MCR(15, 0, 0, 7, 8, 0),
-			virt);
-	if (retval != ERROR_OK)
-		goto done;
-	retval = dpm->instr_read_data_r0(dpm,
-			ARMV4_5_MRC(15, 0, 0, 7, 4, 0),
-			val);
-	/* decode memory attribute */
-	NOS = (*val >> 10) & 1;	/*  Not Outer shareable */
-	NS = (*val >> 9) & 1;	/* Non secure */
-	INNER = (*val >> 4) &  0x7;
-	OUTER = (*val >> 2) & 0x3;
-
-	if (retval != ERROR_OK)
-		goto done;
-	*val = (*val & ~0xfff)  +  (va & 0xfff);
-	if (*val == va)
-		LOG_WARNING("virt = phys  : MMU disable !!");
-	if (meminfo) {
-		LOG_INFO("%" PRIx32 " : %" PRIx32 " %s outer shareable %s secured",
-			va, *val,
-			NOS == 1 ? "not" : " ",
-			NS == 1 ? "not" : "");
-		switch (OUTER) {
-			case 0:
-				LOG_INFO("outer: Non-Cacheable");
-				break;
-			case 1:
-				LOG_INFO("outer: Write-Back, Write-Allocate");
-				break;
-			case 2:
-				LOG_INFO("outer: Write-Through, No Write-Allocate");
-				break;
-			case 3:
-				LOG_INFO("outer: Write-Back, no Write-Allocate");
-				break;
-		}
-		switch (INNER) {
-			case 0:
-				LOG_INFO("inner: Non-Cacheable");
-				break;
-			case 1:
-				LOG_INFO("inner: Strongly-ordered");
-				break;
-			case 3:
-				LOG_INFO("inner: Device");
-				break;
-			case 5:
-				LOG_INFO("inner: Write-Back, Write-Allocate");
-				break;
-			case 6:
-				LOG_INFO("inner:  Write-Through");
-				break;
-			case 7:
-				LOG_INFO("inner: Write-Back, no Write-Allocate");
-
-			default:
-				LOG_INFO("inner: %" PRIx32 " ???", INNER);
-		}
-	}
+	if (armv8->page_size == 0)
+		return armv8_4K_translate(target, va, val);
 
 done:
 	dpm->finish(dpm);
-
-	return retval;
+	return ERROR_FAIL;
 }
+
 
 static int armv8_handle_inner_cache_info_command(struct command_context *cmd_ctx,
 	struct armv8_cache_common *armv8_cache)
@@ -357,7 +464,7 @@ static int _armv8_flush_all_data(struct target *target)
 			/*  DCCISW */
 			/* LOG_INFO ("%d %d %x",c_way,c_index,value); */
 			retval = dpm->instr_write_data_r0(dpm,
-					ARMV4_5_MCR(15, 0, 0, 7, 14, 2),
+					ARMV8_MSR_GP(SYSTEM_DCCISW, 0),
 					value);
 			if (retval != ERROR_OK)
 				goto done;
@@ -427,7 +534,7 @@ static int armv8_read_mpidr(struct target *target)
 	/* MRC p15,0,<Rd>,c0,c0,5; read Multiprocessor ID register*/
 
 	retval = dpm->instr_read_data_r0(dpm,
-			ARMV4_5_MRC(15, 0, 0, 0, 0, 5),
+			ARMV8_MRS(SYSTEM_MPIDR, 0),
 			&mpidr);
 	if (retval != ERROR_OK)
 		goto done;
@@ -452,23 +559,22 @@ done:
 
 int armv8_identify_cache(struct target *target)
 {
-	/*  read cache descriptor */
+	/*	read cache descriptor */
 	int retval = ERROR_FAIL;
 	struct armv8_common *armv8 = target_to_armv8(target);
 	struct arm_dpm *dpm = armv8->arm.dpm;
 	uint32_t cache_selected, clidr;
 	uint32_t cache_i_reg, cache_d_reg;
 	struct armv8_cache_common *cache = &(armv8->armv8_mmu.armv8_cache);
-	if (!armv8->is_armv7r)
-		armv8_read_ttbcr(target);
+	armv8_read_ttbcr(target);
 	retval = dpm->prepare(dpm);
 
 	if (retval != ERROR_OK)
 		goto done;
-	/*  retrieve CLIDR
-	 *  mrc	p15, 1, r0, c0, c0, 1		@ read clidr */
+	/*	retrieve CLIDR
+	 *	mrc p15, 1, r0, c0, c0, 1		@ read clidr */
 	retval = dpm->instr_read_data_r0(dpm,
-			ARMV4_5_MRC(15, 1, 0, 0, 0, 1),
+			ARMV8_MRS(SYSTEM_CLIDR, 0),
 			&clidr);
 	if (retval != ERROR_OK)
 		goto done;
@@ -476,58 +582,51 @@ int armv8_identify_cache(struct target *target)
 	LOG_INFO("number of cache level %" PRIx32, (uint32_t)(clidr / 2));
 	if ((clidr / 2) > 1) {
 		/* FIXME not supported present in cortex A8 and later */
-		/*  in cortex A7, A15 */
+		/*	in cortex A7, A15 */
 		LOG_ERROR("cache l2 present :not supported");
 	}
-	/*  retrieve selected cache
-	 *  MRC p15, 2,<Rd>, c0, c0, 0; Read CSSELR */
+	/*	retrieve selected cache*/
 	retval = dpm->instr_read_data_r0(dpm,
-			ARMV4_5_MRC(15, 2, 0, 0, 0, 0),
+			ARMV8_MRS(SYSTEM_CSSELR, 0),
 			&cache_selected);
 	if (retval != ERROR_OK)
 		goto done;
 
-	retval = armv8->arm.mrc(target, 15,
-			2, 0,	/* op1, op2 */
-			0, 0,	/* CRn, CRm */
-			&cache_selected);
-	if (retval != ERROR_OK)
-		goto done;
+
 	/* select instruction cache
-	 *  MCR p15, 2,<Rd>, c0, c0, 0; Write CSSELR
-	 *  [0]  : 1 instruction cache selection , 0 data cache selection */
+	 *	[0]  : 1 instruction cache selection , 0 data cache selection */
 	retval = dpm->instr_write_data_r0(dpm,
-			ARMV4_5_MRC(15, 2, 0, 0, 0, 0),
+			ARMV8_MRS(SYSTEM_CSSELR, 0),
 			1);
 	if (retval != ERROR_OK)
 		goto done;
 
 	/* read CCSIDR
 	 * MRC P15,1,<RT>,C0, C0,0 ;on cortex A9 read CCSIDR
-	 * [2:0] line size  001 eight word per line
+	 * [2:0] line size	001 eight word per line
 	 * [27:13] NumSet 0x7f 16KB, 0xff 32Kbytes, 0x1ff 64Kbytes */
 	retval = dpm->instr_read_data_r0(dpm,
-			ARMV4_5_MRC(15, 1, 0, 0, 0, 0),
+			ARMV8_MRS(SYSTEM_CCSIDR, 0),
 			&cache_i_reg);
 	if (retval != ERROR_OK)
 		goto done;
 
-	/*  select data cache*/
+	/*	select data cache*/
 	retval = dpm->instr_write_data_r0(dpm,
-			ARMV4_5_MRC(15, 2, 0, 0, 0, 0),
+			ARMV8_MRS(SYSTEM_CSSELR, 0),
 			0);
 	if (retval != ERROR_OK)
 		goto done;
 
 	retval = dpm->instr_read_data_r0(dpm,
-			ARMV4_5_MRC(15, 1, 0, 0, 0, 0),
+			ARMV8_MRS(SYSTEM_CCSIDR, 0),
 			&cache_d_reg);
 	if (retval != ERROR_OK)
 		goto done;
 
-	/*  restore selected cache  */
+	/*	restore selected cache	*/
 	dpm->instr_write_data_r0(dpm,
-		ARMV4_5_MRC(15, 2, 0, 0, 0, 0),
+		ARMV8_MRS(SYSTEM_CSSELR, 0),
 		cache_selected);
 
 	if (retval != ERROR_OK)
@@ -539,7 +638,7 @@ int armv8_identify_cache(struct target *target)
 	cache->d_u_size.cachesize = (((cache_d_reg >> 13) & 0x7fff)+1)/8;
 	cache->d_u_size.nsets = (cache_d_reg >> 13) & 0x7fff;
 	cache->d_u_size.associativity = ((cache_d_reg >> 3) & 0x3ff) + 1;
-	/*  compute info for set way operation on cache */
+	/*	compute info for set way operation on cache */
 	cache->d_u_size.index_shift = (cache_d_reg & 0x7) + 4;
 	cache->d_u_size.index = (cache_d_reg >> 13) & 0x7fff;
 	cache->d_u_size.way = ((cache_d_reg >> 3) & 0x3ff);
@@ -565,7 +664,7 @@ int armv8_identify_cache(struct target *target)
 	cache->i_size.associativity = ((cache_i_reg >> 3) & 0x3ff) + 1;
 	cache->i_size.nsets = (cache_i_reg >> 13) & 0x7fff;
 	cache->i_size.cachesize = (((cache_i_reg >> 13) & 0x7fff)+1)/8;
-	/*  compute info for set way operation on cache */
+	/*	compute info for set way operation on cache */
 	cache->i_size.index_shift = (cache_i_reg & 0x7) + 4;
 	cache->i_size.index = (cache_i_reg >> 13) & 0x7fff;
 	cache->i_size.way = ((cache_i_reg >> 3) & 0x3ff);
@@ -586,7 +685,7 @@ int armv8_identify_cache(struct target *target)
 			cache->i_size.cachesize,
 			cache->i_size.associativity);
 #endif
-	/*  if no l2 cache initialize l1 data cache flush function function */
+	/*	if no l2 cache initialize l1 data cache flush function function */
 	if (armv8->armv8_mmu.armv8_cache.flush_all_data_cache == NULL) {
 		armv8->armv8_mmu.armv8_cache.display_cache_info =
 			armv8_handle_inner_cache_info_command;
@@ -601,6 +700,7 @@ done:
 	return retval;
 
 }
+
 
 int armv8_init_arch_info(struct target *target, struct armv8_common *armv8)
 {
@@ -624,6 +724,27 @@ int armv8_init_arch_info(struct target *target, struct armv8_common *armv8)
 	return ERROR_OK;
 }
 
+int armv8_aarch64_state(struct target *target)
+{
+	struct arm *arm = target_to_arm(target);
+
+	if (arm->common_magic != ARM_COMMON_MAGIC) {
+		LOG_ERROR("BUG: called for a non-ARM target");
+		return ERROR_FAIL;
+	}
+
+	LOG_USER("target halted in %s state due to %s, current mode: %s\n"
+		"cpsr: 0x%8.8" PRIx32 " pc: 0x%" PRIx64 "%s",
+		armv8_state_strings[arm->core_state],
+		debug_reason_name(target),
+		armv8_mode_name(arm->core_mode),
+		buf_get_u32(arm->cpsr->value, 0, 32),
+		buf_get_u64(arm->pc->value, 0, 64),
+		arm->is_semihosting ? ", semihosting" : "");
+
+	return ERROR_OK;
+}
+
 int armv8_arch_state(struct target *target)
 {
 	static const char * const state[] = {
@@ -638,18 +759,15 @@ int armv8_arch_state(struct target *target)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
-	arm_arch_state(target);
+	if (arm->core_state == ARM_STATE_AARCH64)
+		armv8_aarch64_state(target);
+	else
+		arm_arch_state(target);
 
-	if (armv8->is_armv7r) {
-		LOG_USER("D-Cache: %s, I-Cache: %s",
-			state[armv8->armv8_mmu.armv8_cache.d_u_cache_enabled],
-			state[armv8->armv8_mmu.armv8_cache.i_cache_enabled]);
-	} else {
-		LOG_USER("MMU: %s, D-Cache: %s, I-Cache: %s",
-			state[armv8->armv8_mmu.mmu_enabled],
-			state[armv8->armv8_mmu.armv8_cache.d_u_cache_enabled],
-			state[armv8->armv8_mmu.armv8_cache.i_cache_enabled]);
-	}
+	LOG_USER("MMU: %s, D-Cache: %s, I-Cache: %s",
+		state[armv8->armv8_mmu.mmu_enabled],
+		state[armv8->armv8_mmu.armv8_cache.d_u_cache_enabled],
+		state[armv8->armv8_mmu.armv8_cache.i_cache_enabled]);
 
 	if (arm->core_mode == ARM_MODE_ABT)
 		armv8_show_fault_registers(target);
@@ -728,14 +846,20 @@ static int armv8_set_core_reg(struct reg *reg, uint8_t *buf)
 {
 	struct arm_reg *armv8_reg = reg->arch_info;
 	struct target *target = armv8_reg->target;
+	struct arm *armv8_target = target_to_arm(target);
 	uint64_t value = buf_get_u64(buf, 0, 64);
 
 	if (target->state != TARGET_HALTED)
 		return ERROR_TARGET_NOT_HALTED;
 
-	buf_set_u64(reg->value, 0, 64, value);
+	if (reg == armv8_target->cpsr) {
+		arm_set_cpsr(armv8_target, (uint32_t)value);
+	} else {
+		buf_set_u64(reg->value, 0, 64, value);
+		reg->valid = 1;
+	}
+
 	reg->dirty = 1;
-	reg->valid = 1;
 
 	return ERROR_OK;
 }
@@ -808,7 +932,7 @@ struct reg *armv8_reg_current(struct arm *arm, unsigned regnum)
 {
 	struct reg *r;
 
-	if (regnum > 33)
+	if (regnum > (ARMV8_LAST_REG - 1))
 		return NULL;
 
 	r = arm->core_cache->reg_list + regnum;

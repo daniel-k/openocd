@@ -23,13 +23,6 @@
 
 #define AARCH64_COMMON_MAGIC 0x411fc082
 
-#define CPUDBG_CPUID	0xD00
-#define CPUDBG_CTYPR	0xD04
-#define CPUDBG_TTYPR	0xD0C
-#define ID_AA64DFR0_EL1	0xD28
-#define CPUDBG_LOCKACCESS 0xFB0
-#define CPUDBG_LOCKSTATUS 0xFB4
-
 #define BRP_NORMAL 0
 #define BRP_CONTEXT 1
 
@@ -38,7 +31,7 @@
 struct aarch64_brp {
 	int used;
 	int type;
-	uint32_t value;
+	uint64_t value;
 	uint32_t control;
 	uint8_t BRPn;
 };

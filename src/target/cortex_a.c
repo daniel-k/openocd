@@ -775,7 +775,7 @@ static int cortex_a_dpm_setup(struct cortex_a_common *a, uint32_t didr)
 	dpm->bpwp_enable = cortex_a_bpwp_enable;
 	dpm->bpwp_disable = cortex_a_bpwp_disable;
 
-	retval = arm_dpm_setup(dpm, 32);
+	retval = arm_dpm_setup(dpm);
 	if (retval == ERROR_OK)
 		retval = arm_dpm_initialize(dpm);
 
@@ -1002,6 +1002,9 @@ static int cortex_a_internal_restore(struct target *target, int current,
 		case ARM_STATE_JAZELLE:
 			LOG_ERROR("How do I resume into Jazelle state??");
 			return ERROR_FAIL;
+		default:
+			LOG_WARNING("unknow core state");
+			break;
 	}
 	LOG_DEBUG("resume pc = 0x%08" PRIx32, resume_pc);
 	buf_set_u32(arm->pc->value, 0, 32, resume_pc);

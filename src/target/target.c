@@ -1002,7 +1002,7 @@ int target_read_memory(struct target *target,
 		LOG_ERROR("Target not examined yet");
 		return ERROR_FAIL;
 	}
-	if (target->reg_cache->reg_list[0].size == 64)
+	if (target->type->pc_size == 64)
 		i = target->type->read_memory_64(target, address, size, count, buffer);
 	else
 		i = target->type->read_memory(target, address, size, count, buffer);
@@ -1946,7 +1946,7 @@ int target_read_buffer(struct target *target, uint64_t address, uint32_t size, u
 		return ERROR_FAIL;
 	}
 
-	if (target->reg_cache->reg_list[0].size == 64)
+	if (target->type->pc_size == 64)
 		return target->type->read_buffer_64(target, address, size, buffer);
 	else
 		return target->type->read_buffer(target, address, size, buffer);
@@ -3322,29 +3322,30 @@ static int handle_bp_command_list(struct command_context *cmd_ctx)
 {
 	struct target *target = get_current_target(cmd_ctx);
 	struct breakpoint *breakpoint = target->breakpoints;
+	bool pc_64bits = (target->type->pc_size == 64) ? 1 : 0 ;
 	while (breakpoint) {
 		if (breakpoint->type == BKPT_SOFT) {
 			char *buf = buf_to_str(breakpoint->orig_instr,
 					breakpoint->length, 16);
-			command_print(cmd_ctx, "IVA breakpoint: 0x%8.8" PRIx32 ", 0x%x, %i, 0x%s",
-					breakpoint->address,
+			command_print(cmd_ctx, "IVA breakpoint: 0x%8.8" PRIx64 ", 0x%x, %i, 0x%s",
+					pc_64bits ? breakpoint->address_64 : breakpoint->address,
 					breakpoint->length,
 					breakpoint->set, buf);
 			free(buf);
 		} else {
-			if ((breakpoint->address == 0) && (breakpoint->asid != 0))
+			if ((breakpoint->address_64 == 0) && (breakpoint->address == 0) && (breakpoint->asid != 0))
 				command_print(cmd_ctx, "Context breakpoint: 0x%8.8" PRIx32 ", 0x%x, %i",
 							breakpoint->asid,
 							breakpoint->length, breakpoint->set);
-			else if ((breakpoint->address != 0) && (breakpoint->asid != 0)) {
-				command_print(cmd_ctx, "Hybrid breakpoint(IVA): 0x%8.8" PRIx32 ", 0x%x, %i",
-							breakpoint->address,
+			else if (((breakpoint->address != 0) || (breakpoint->address_64 != 0)) && (breakpoint->asid != 0)) {
+				command_print(cmd_ctx, "Hybrid breakpoint(IVA): 0x%8.8" PRIx64 ", 0x%x, %i",
+							pc_64bits ? breakpoint->address_64 : breakpoint->address,
 							breakpoint->length, breakpoint->set);
 				command_print(cmd_ctx, "\t|--->linked with ContextID: 0x%8.8" PRIx32,
 							breakpoint->asid);
 			} else
-				command_print(cmd_ctx, "Breakpoint(IVA): 0x%8.8" PRIx32 ", 0x%x, %i",
-							breakpoint->address,
+				command_print(cmd_ctx, "Breakpoint(IVA): 0x%8.8" PRIx64 ", 0x%x, %i",
+							pc_64bits ? breakpoint->address_64 : breakpoint->address,
 							breakpoint->length, breakpoint->set);
 		}
 
@@ -3354,7 +3355,7 @@ static int handle_bp_command_list(struct command_context *cmd_ctx)
 }
 
 static int handle_bp_command_set(struct command_context *cmd_ctx,
-		uint32_t addr, uint32_t asid, uint32_t length, int hw)
+		uint64_t addr, uint32_t asid, uint32_t length, int hw)
 {
 	struct target *target = get_current_target(cmd_ctx);
 	int retval;
@@ -3362,7 +3363,7 @@ static int handle_bp_command_set(struct command_context *cmd_ctx,
 	if (asid == 0) {
 		retval = breakpoint_add(target, addr, length, hw);
 		if (ERROR_OK == retval)
-			command_print(cmd_ctx, "breakpoint set at 0x%8.8" PRIx32 "", addr);
+			command_print(cmd_ctx, "breakpoint set at 0x%16.8" PRIx64 "", addr);
 		else {
 			LOG_ERROR("Failure setting breakpoint, the same address(IVA) is already used");
 			return retval;
@@ -3397,7 +3398,7 @@ static int handle_bp_command_set(struct command_context *cmd_ctx,
 
 COMMAND_HANDLER(handle_bp_command)
 {
-	uint32_t addr;
+	uint64_t addr;
 	uint32_t asid;
 	uint32_t length;
 	int hw = BKPT_SOFT;
@@ -3408,14 +3409,14 @@ COMMAND_HANDLER(handle_bp_command)
 
 		case 2:
 			asid = 0;
-			COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], addr);
+			COMMAND_PARSE_NUMBER(u64, CMD_ARGV[0], addr);
 			COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], length);
 			return handle_bp_command_set(CMD_CTX, addr, asid, length, hw);
 
 		case 3:
 			if (strcmp(CMD_ARGV[2], "hw") == 0) {
 				hw = BKPT_HARD;
-				COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], addr);
+				COMMAND_PARSE_NUMBER(u64, CMD_ARGV[0], addr);
 
 				COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], length);
 
@@ -3431,7 +3432,7 @@ COMMAND_HANDLER(handle_bp_command)
 
 		case 4:
 			hw = BKPT_HARD;
-			COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], addr);
+			COMMAND_PARSE_NUMBER(u64, CMD_ARGV[0], addr);
 			COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], asid);
 			COMMAND_PARSE_NUMBER(u32, CMD_ARGV[2], length);
 			return handle_bp_command_set(CMD_CTX, addr, asid, length, hw);
@@ -3446,8 +3447,8 @@ COMMAND_HANDLER(handle_rbp_command)
 	if (CMD_ARGC != 1)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 
-	uint32_t addr;
-	COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], addr);
+	uint64_t addr;
+	COMMAND_PARSE_NUMBER(u64, CMD_ARGV[0], addr);
 
 	struct target *target = get_current_target(CMD_CTX);
 	breakpoint_remove(target, addr);
@@ -4180,6 +4181,7 @@ enum target_cfg_param {
 	TCFG_COREID,
 	TCFG_CHAIN_POSITION,
 	TCFG_DBGBASE,
+	TCFG_CTIBASE,
 	TCFG_RTOS,
 };
 
@@ -4194,6 +4196,7 @@ static Jim_Nvp nvp_config_opts[] = {
 	{ .name = "-coreid",           .value = TCFG_COREID },
 	{ .name = "-chain-position",   .value = TCFG_CHAIN_POSITION },
 	{ .name = "-dbgbase",          .value = TCFG_DBGBASE },
+	{ .name = "-ctibase",          .value = TCFG_CTIBASE },
 	{ .name = "-rtos",             .value = TCFG_RTOS },
 	{ .name = NULL, .value = -1 }
 };
@@ -4459,7 +4462,20 @@ no_params:
 			Jim_SetResult(goi->interp, Jim_NewIntObj(goi->interp, target->dbgbase));
 			/* loop for more */
 			break;
-
+		case TCFG_CTIBASE:
+			if (goi->isconfigure) {
+				e = Jim_GetOpt_Wide(goi, &w);
+				if (e != JIM_OK)
+					return e;
+				target->ctibase = (uint32_t)w;
+				target->ctibase_set = true;
+			} else {
+				if (goi->argc != 0)
+					goto no_params;
+			}
+			Jim_SetResult(goi->interp, Jim_NewIntObj(goi->interp, target->ctibase));
+			/* loop for more */
+			break;
 		case TCFG_RTOS:
 			/* RTOS */
 			{

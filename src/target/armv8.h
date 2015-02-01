@@ -23,7 +23,7 @@
 #include "arm.h"
 #include "armv4_5_mmu.h"
 #include "armv4_5_cache.h"
-#include "arm_dpm.h"
+#include "armv8_dpm.h"
 
 enum {
 	ARMV8_R0,
@@ -113,7 +113,7 @@ struct armv8_cache_common {
 struct armv8_mmu_common {
 	/* following field mmu working way */
 	int32_t ttbr1_used; /*  -1 not initialized, 0 no ttbr1 1 ttbr1 used and  */
-	uint32_t ttbr0_mask;/*  masked to be used  */
+	uint64_t ttbr0_mask;/*  masked to be used  */
 	uint32_t os_border;
 
 	int (*read_physical_memory)(struct target *target, uint64_t address, uint32_t size,
@@ -132,6 +132,8 @@ struct armv8_common {
 	/* Core Debug Unit */
 	struct arm_dpm dpm;
 	uint32_t debug_base;
+	uint32_t cti_base;
+
 	uint8_t debug_ap;
 	uint8_t memory_ap;
 	bool memory_ap_available;
@@ -140,6 +142,12 @@ struct armv8_common {
 	uint8_t cluster_id;
 	uint8_t cpu_id;
 	bool is_armv7r;
+
+	/* armv8 aarch64 need below information for page translation */
+	uint8_t va_size;
+	uint8_t pa_size;
+	uint32_t page_size;
+	uint64_t ttbr_base;
 
 	/* cache specific to V7 Memory Management Unit compatible with v4_5*/
 	struct armv8_mmu_common armv8_mmu;
@@ -161,32 +169,79 @@ target_to_armv8(struct target *target)
 }
 
 /* register offsets from armv8.debug_base */
+#define CPUV8_DBG_MAINID0		0xD00
+#define CPUV8_DBG_CPUFEATURE0	0xD20
+#define CPUV8_DBG_DBGFEATURE0	0xD28
+#define CPUV8_DBG_MEMFEATURE0	0xD38
 
-#define CPUDBG_WFAR		0x018
-/* PCSR at 0x084 -or- 0x0a0 -or- both ... based on flags in DIDR */
-#define CPUDBG_DSCR		0x088
-#define CPUDBG_DRCR		0x090
-#define CPUDBG_PRCR		0x310
-#define CPUDBG_PRSR		0x314
+#define CPUV8_DBG_LOCKACCESS 0xFB0
+#define CPUV8_DBG_LOCKSTATUS 0xFB4
 
-#define CPUDBG_DTRRX		0x080
-#define CPUDBG_ITR		0x084
-#define CPUDBG_DTRTX		0x08c
 
-#define CPUDBG_BVR_BASE		0x100
-#define CPUDBG_BCR_BASE		0x140
-#define CPUDBG_WVR_BASE		0x180
-#define CPUDBG_WCR_BASE		0x1C0
-#define CPUDBG_VCR		0x01C
+#define CPUV8_DBG_EDECR		0x24
+#define CPUV8_DBG_WFAR0		0x30
+#define CPUV8_DBG_WFAR1		0x34
+#define CPUV8_DBG_DSCR		0x088
+#define CPUV8_DBG_DRCR		0x090
+#define CPUV8_DBG_PRCR		0x310
+#define CPUV8_DBG_PRSR		0x314
 
-#define CPUDBG_OSLAR		0x300
-#define CPUDBG_OSLSR		0x304
-#define CPUDBG_OSSRR		0x308
-#define CPUDBG_ECR		0x024
+#define CPUV8_DBG_DTRRX		0x080
+#define CPUV8_DBG_ITR		0x084
+#define CPUV8_DBG_SCR		0x088
+#define CPUV8_DBG_DTRTX		0x08c
 
-#define CPUDBG_DSCCR		0x028
+#define CPUV8_DBG_BVR_BASE	0x400
+#define CPUV8_DBG_BCR_BASE	0x408
+#define CPUV8_DBG_WVR_BASE	0x800
+#define CPUV8_DBG_WCR_BASE	0x808
+#define CPUV8_DBG_VCR		0x01C
 
-#define CPUDBG_AUTHSTATUS	0xFB8
+#define CPUV8_DBG_OSLAR		0x300
+
+#define CPUV8_DBG_AUTHSTATUS	0xFB8
+
+/*define CTI(cross trigger interface)*/
+#define CTI_CTR				0x0
+#define CTI_INACK			0x10
+#define CTI_APPSET			0x14
+#define CTI_APPCLEAR		0x18
+#define CTI_APPPULSE		0x1C
+#define CTI_INEN0			0x20
+#define CTI_INEN1			0x24
+#define CTI_INEN2			0x28
+#define CTI_INEN3			0x2C
+#define CTI_INEN4			0x30
+#define CTI_INEN5			0x34
+#define CTI_INEN6			0x38
+#define CTI_INEN7			0x3C
+#define CTI_OUTEN0			0xA0
+#define CTI_OUTEN1			0xA4
+#define CTI_OUTEN2			0xA8
+#define CTI_OUTEN3			0xAC
+#define CTI_OUTEN4			0xB0
+#define CTI_OUTEN5			0xB4
+#define CTI_OUTEN6			0xB8
+#define CTI_OUTEN7			0xBC
+#define CTI_TRIN_STATUS		0x130
+#define CTI_TROUT_STATUS	0x134
+#define CTI_CHIN_STATUS		0x138
+#define CTI_CHOU_STATUS		0x13C
+#define CTI_GATE			0x140
+#define CTI_UNLOCK			0xFB0
+
+#define PAGE_SIZE_4KB				0x1000
+#define PAGE_SIZE_4KB_LEVEL0_BITS	39
+#define PAGE_SIZE_4KB_LEVEL1_BITS	30
+#define PAGE_SIZE_4KB_LEVEL2_BITS	21
+#define PAGE_SIZE_4KB_LEVEL3_BITS	12
+
+#define PAGE_SIZE_4KB_LEVEL0_MASK	((0x1FFULL) << PAGE_SIZE_4KB_LEVEL0_BITS)
+#define PAGE_SIZE_4KB_LEVEL1_MASK	((0x1FFULL) << PAGE_SIZE_4KB_LEVEL1_BITS)
+#define PAGE_SIZE_4KB_LEVEL2_MASK	((0x1FFULL) << PAGE_SIZE_4KB_LEVEL2_BITS)
+#define PAGE_SIZE_4KB_LEVEL3_MASK	((0x1FFULL) << PAGE_SIZE_4KB_LEVEL3_BITS)
+
+#define PAGE_SIZE_4KB_TRBBASE_MASK	0xFFFFFFFFF000
 
 int armv8_arch_state(struct target *target);
 int armv8_identify_cache(struct target *target);

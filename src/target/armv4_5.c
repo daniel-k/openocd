@@ -1001,6 +1001,140 @@ static int jim_mcrmrc(Jim_Interp *interp, int argc, Jim_Obj * const *argv)
 	return JIM_OK;
 }
 
+
+static int jim_mcrmsr(Jim_Interp *interp, int argc, Jim_Obj * const *argv)
+{
+	struct command_context *context;
+	struct target *target;
+	struct arm *arm;
+	int retval;
+
+	context = current_command_context(interp);
+	assert(context != NULL);
+
+	target = get_current_target(context);
+	if (target == NULL) {
+		LOG_ERROR("%s: no current target", __func__);
+		return JIM_ERR;
+	}
+	if (!target_was_examined(target)) {
+		LOG_ERROR("%s: not yet examined", target_name(target));
+		return JIM_ERR;
+	}
+	arm = target_to_arm(target);
+	if (!is_arm(arm)) {
+		LOG_ERROR("%s: not an ARM", target_name(target));
+		return JIM_ERR;
+	}
+
+	if (arm->msr == NULL || arm->mrs == NULL) {
+		LOG_ERROR("MSR/MRS not supported");
+		return JIM_ERR;
+	}
+
+	if ((argc < 6) || (argc > 7)) {
+		/* FIXME use the command name to verify # params... */
+		LOG_ERROR("%s: wrong number of arguments", __func__);
+		return JIM_ERR;
+	}
+
+	uint32_t op0;
+	uint32_t op1;
+	uint32_t op2;
+	uint32_t CRn;
+	uint32_t CRm;
+	uint32_t value;
+	long l;
+
+	/* NOTE:  parameter sequence matches ARM instruction set usage:
+	 *	MCR	pNUM, op1, rX, CRn, CRm, op2	; write CP from rX
+	 *	MRC	pNUM, op1, rX, CRn, CRm, op2	; read CP into rX
+	 * The "rX" is necessarily omitted; it uses Tcl mechanisms.
+	 */
+	retval = Jim_GetLong(interp, argv[1], &l);
+	if (retval != JIM_OK)
+		return retval;
+	if (l & ~0xf) {
+		LOG_ERROR("%s: %s %d out of range", __func__,
+			"coprocessor", (int) l);
+		return JIM_ERR;
+	}
+	op0 = l;
+
+	retval = Jim_GetLong(interp, argv[2], &l);
+	if (retval != JIM_OK)
+		return retval;
+	if (l & ~0x7) {
+		LOG_ERROR("%s: %s %d out of range", __func__,
+			"op1", (int) l);
+		return JIM_ERR;
+	}
+	op1 = l;
+
+	retval = Jim_GetLong(interp, argv[3], &l);
+	if (retval != JIM_OK)
+		return retval;
+	if (l & ~0xf) {
+		LOG_ERROR("%s: %s %d out of range", __func__,
+			"CRn", (int) l);
+		return JIM_ERR;
+	}
+	CRn = l;
+
+	retval = Jim_GetLong(interp, argv[4], &l);
+	if (retval != JIM_OK)
+		return retval;
+	if (l & ~0xf) {
+		LOG_ERROR("%s: %s %d out of range", __func__,
+			"CRm", (int) l);
+		return JIM_ERR;
+	}
+	CRm = l;
+
+	retval = Jim_GetLong(interp, argv[5], &l);
+	if (retval != JIM_OK)
+		return retval;
+	if (l & ~0x7) {
+		LOG_ERROR("%s: %s %d out of range", __func__,
+			"op2", (int) l);
+		return JIM_ERR;
+	}
+	op2 = l;
+
+	value = 0;
+
+	/* FIXME don't assume "mrc" vs "mcr" from the number of params;
+	 * that could easily be a typo!  Check both...
+	 *
+	 * FIXME change the call syntax here ... simplest to just pass
+	 * the MRC() or MCR() instruction to be executed.  That will also
+	 * let us support the "mrc2" and "mcr2" opcodes (toggling one bit)
+	 * if that's ever needed.
+	 */
+	if (argc == 7) {
+		retval = Jim_GetLong(interp, argv[6], &l);
+		if (retval != JIM_OK)
+			return retval;
+		value = l;
+
+		/* NOTE: parameters reordered! */
+		/* ARMV8_MSR(cpnum, op1, 0, CRn, CRm, op2) */
+		retval = arm->msr(target, op0, op1, op2, CRn, CRm, value);
+		if (retval != ERROR_OK)
+			return JIM_ERR;
+	} else {
+		/* NOTE: parameters reordered! */
+		/* ARMV8_MRS(cpnum, op1, 0, CRn, CRm, op2) */
+		retval = arm->mrs(target, op0, op1, op2, CRn, CRm, &value);
+		if (retval != ERROR_OK)
+			return JIM_ERR;
+
+		Jim_SetResult(interp, Jim_NewIntObj(interp, value));
+	}
+
+	return JIM_OK;
+}
+
 COMMAND_HANDLER(handle_arm_semihosting_command)
 {
 	struct target *target = get_current_target(CMD_CTX);
@@ -1083,6 +1217,20 @@ static const struct command_registration arm_exec_command_handlers[] = {
 		.help = "read coprocessor register",
 		.usage = "cpnum op1 CRn CRm op2",
 	},
+	{
+		.name = "msr",
+		.mode = COMMAND_EXEC,
+		.jim_handler = &jim_mcrmsr,
+		.help = "write system register",
+		.usage = "op0 op1 CRn CRm op2 value",
+	},
+	{
+		.name = "mrs",
+		.jim_handler = &jim_mcrmsr,
+		.help = "read system register",
+		.usage = "op0 op1 CRn CRm op2",
+	},
+
 	{
 		"semihosting",
 		.handler = handle_arm_semihosting_command,

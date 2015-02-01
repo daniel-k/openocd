@@ -85,6 +85,7 @@ ARMV7_SRC = \
 	cortex_a.c
 
 ARMV8_SRC = \
+	armv8_dpm.c \
 	aarch64.c \
 	armv8.c
 
@@ -161,6 +162,8 @@ noinst_HEADERS = \
 	armv7a.h \
 	armv7m.h \
 	armv8.h \
+	armv8_dpm.h \
+	armv8_opcodes.h \
 	avrt.h \
 	dsp563xx.h \
 	dsp563xx_once.h \
