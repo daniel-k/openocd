@@ -45,7 +45,7 @@ static int aarch64_mmu(struct target *target, int *enabled);
 static int aarch64_virt2phys(struct target *target,
 	uint32_t virt, uint32_t *phys);
 static int aarch64_read_apb_ab_memory(struct target *target,
-	uint32_t address, uint32_t size, uint32_t count, uint8_t *buffer);
+	uint64_t address, uint32_t size, uint32_t count, uint8_t *buffer);
 
 static int aarch64_instr_write_data_r0(struct arm_dpm *dpm,
 				       uint32_t opcode, uint32_t data);
@@ -1950,9 +1950,109 @@ error_free_buff_w:
 	return ERROR_FAIL;
 }
 
+# if 1 /* new */
+# define DSCR_INSTR_COMP             (0x1 << 24)
+static int aarch64_read_apb_ab_memory(struct target *target,
+	uint64_t address, uint32_t size,
+	uint32_t count, uint8_t *buffer)
+{
+	/* read memory through APB-AP */
+
+	int retval = ERROR_COMMAND_SYNTAX_ERROR;
+	struct armv8_common *armv8 = target_to_armv8(target);
+	struct adiv5_dap *swjdp = armv8->arm.dap;
+	struct arm *arm = &armv8->arm;
+	struct reg *reg;
+	uint32_t dscr, val;
+	uint8_t *tmp_buff = NULL;
+	uint32_t i = 0;
+	uint32_t o_size = size;
+
+	LOG_DEBUG("Reading APB-AP memory address 0x%" PRIx64 " size %"  PRIu32 " count %"  PRIu32,
+			  address, size, count);
+	if (target->state != TARGET_HALTED) {
+		LOG_WARNING("target not halted");
+		return ERROR_TARGET_NOT_HALTED;
+	}
+
+	/* Mark register R0 as dirty, as it will be used
+	 * for transferring the data.
+	 * It will be restored automatically when exiting
+	 * debug mode
+	 */
+	reg = armv8_reg_current(arm, 0);
+	reg->dirty = true;
+
+	/*  clear any abort  */
+	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+		armv8->debug_base + CPUV8_DBG_DRCR, 1<<2);
+	if (retval != ERROR_OK)
+		goto error_free_buff_r;
+
+	retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
+	if (retval != ERROR_OK)
+		goto error_unset_dtr_r;
+
+	if (size > 4) {
+	  if (size == 8) {
+	    o_size = 4;
+	    count = count * 2;
+	  }
+	  else {
+	    LOG_WARNING("reading size %d bytes not yet supported", size);
+	    goto error_unset_dtr_r;
+	  }
+	}
+
+	while (i < count * o_size) {
+
+		retval = aarch64_instr_write_data_dcc_64(arm->dpm, 0xd5330400, address+4);
+		if (retval != ERROR_OK)
+			goto error_unset_dtr_r;
+		retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
+
+		dscr = DSCR_INSTR_COMP;
+		retval = aarch64_exec_opcode(target, 0xb85fc000, &dscr);
+		if (retval != ERROR_OK)
+			goto error_unset_dtr_r;
+		retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_DSCR, &dscr);
+
+		retval = aarch64_instr_read_data_dcc(arm->dpm, 0xd5130400, &val);
+		if (retval != ERROR_OK)
+			goto error_unset_dtr_r;
+		memcpy(&buffer[i], &val, o_size);
+		i += 4;
+		address += 4;
+	}
+
+	/* Clear any sticky error */
+	mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+		armv8->debug_base + CPUV8_DBG_DRCR, 1<<2);
+
+	/* Done */
+	return ERROR_OK;
+
+error_unset_dtr_r:
+	LOG_WARNING("DSCR = 0x%" PRIx32, dscr);
+	/* Todo: Unset DTR mode */
+
+error_free_buff_r:
+	LOG_ERROR("error");
+	free(tmp_buff);
+
+	/* Clear any sticky error */
+	mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+		armv8->debug_base + CPUV8_DBG_DRCR, 1<<2);
+
+	return ERROR_FAIL;
+}
+# else /* old */
 
 static int aarch64_read_apb_ab_memory(struct target *target,
-	uint32_t address, uint32_t size,
+	uint64_t address, uint32_t size,
 	uint32_t count, uint8_t *buffer)
 {
 	/* read memory through APB-AP */
@@ -1969,7 +2069,7 @@ static int aarch64_read_apb_ab_memory(struct target *target,
 	uint8_t *tmp_buff = NULL;
 	uint8_t *u8buf_ptr;
 
-	LOG_DEBUG("Reading APB-AP memory address 0x%" PRIx32 " size %"	PRIu32 " count%"  PRIu32,
+	LOG_DEBUG("Reading APB-AP memory address 0x%" PRIx64 " size %"	PRIu32 " count%"  PRIu32,
 			  address, size, count);
 	if (target->state != TARGET_HALTED) {
 		LOG_WARNING("target not halted");
@@ -2013,8 +2113,33 @@ static int aarch64_read_apb_ab_memory(struct target *target,
 	/*	 - Write the address for read access into DTRRX */
 	retval += mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
 			armv8->debug_base + CPUV8_DBG_DTRRX, address & ~0x3);
+
+	/*
+	  Top 32 bits
+	*/
+	retval += mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
+			armv8->debug_base + CPUV8_DBG_DTRTX, (address >> 32) & 0xffffffff );
+
+
 	/*	- Copy value from DTRRX to R0 using instruction mrs DCCRX, x0 */
 	aarch64_exec_opcode(target, ARMV8_MRS(SYSTEM_DBG_DTRRX_EL0, 0), &dscr);
+
+	/*
+	  Discard 1st read
+	*/
+	{
+	  uint32_t scratch = 0;
+
+	  retval = aarch64_exec_opcode(target,
+				       ARMV8_MSR_GP(SYSTEM_DBG_DTRTX_EL0, 0),  /* msr dbgdtrtx_el0, x0 */
+				       &scratch);
+
+	  scratch = 0;
+
+	  retval = mem_ap_sel_read_atomic_u32(swjdp, armv8->debug_ap,
+					      armv8->debug_base + CPUV8_DBG_DTRTX, &scratch);
+	  LOG_DEBUG("dummy read - scratch = 0x%08" PRIx32, scratch);
+	}
 
 	/* change DCC to memory mode
 	 * in one combined write (since they are adjacent registers)
@@ -2101,7 +2226,7 @@ error_free_buff_r:
 	free(tmp_buff);
 	return ERROR_FAIL;
 }
-
+#endif
 
 
 /*
