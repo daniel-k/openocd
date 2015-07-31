@@ -778,6 +778,54 @@ int armv8_arch_state(struct target *target)
 	return ERROR_OK;
 }
 
+# if 1 /* new */
+static const struct {
+	unsigned id;
+	const char *name;
+	unsigned bits;
+	enum reg_type type;
+	const char *group;
+	const char *feature;
+} armv8_regs[] = {
+	{ ARMV8_R0,  "x0",  64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R1,  "x1",  64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R2,  "x2",  64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R3,  "x3",  64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R4,  "x4",  64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R5,  "x5",  64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R6,  "x6",  64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R7,  "x7",  64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R8,  "x8",  64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R9,  "x9",  64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R10, "x10", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R11, "x11", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R12, "x12", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R13, "x13", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R14, "x14", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R15, "x15", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R16, "x16", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R17, "x17", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R18, "x18", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R19, "x19", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R20, "x20", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R21, "x21", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R22, "x22", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R23, "x23", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R24, "x24", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R25, "x25", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R26, "x26", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R27, "x27", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R28, "x28", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R29, "x29", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_R30, "x30", 64, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+
+	{ ARMV8_R31, "sp", 64, REG_TYPE_DATA_PTR, "general", "org.gnu.gdb.aarch64.core" },
+	{ ARMV8_PC,  "pc", 64, REG_TYPE_CODE_PTR, "general", "org.gnu.gdb.aarch64.core" },
+
+	{ ARMV8_xPSR, "CPSR", 32, REG_TYPE_INT, "general", "org.gnu.gdb.aarch64.core" },
+};
+# else /* old */
+
 static const struct {
 	unsigned id;
 	const char *name;
@@ -823,7 +871,7 @@ static const struct {
 
 	{ ARMV8_xPSR, "xPSR", 64, REG_TYPE_INT, "general", "org.gnu.gdb.arm.m-profile" },
 };
-
+#endif /*old */
 #define ARMV8_NUM_REGS ARRAY_SIZE(armv8_regs)
 
 
