@@ -26,5 +26,5 @@
 #include "rtos.h"
 
 extern const struct rtos_register_stacking rtos_riot_Cortex_M0_stacking;
-
+extern const struct rtos_register_stacking rtos_riot_Cortex_M34_stacking;
 #endif	/* ifndef INCLUDED_RTOS_RIOT_STACKINGS_H_ */
