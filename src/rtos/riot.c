@@ -187,6 +187,20 @@ static int riot_update_threads(struct rtos *rtos)
     uint32_t threads_base = rtos->symbols[RIOT_THREADS_BASE].address;
     printf("threads_base = 0x%08x\n", threads_base);
 
+    uint8_t name_offset = 0;
+    if(rtos->symbols[RIOT_NAME_OFFSET].address != 0) {
+        retval = target_read_buffer(rtos->target,
+                                    rtos->symbols[RIOT_NAME_OFFSET].address,
+                                    sizeof(name_offset),
+                                    (uint8_t *)&name_offset);
+        if (retval != ERROR_OK) {
+            LOG_ERROR("Couldn't read `_tcb_name_offset`");
+            return retval;
+        }
+    }
+
+    printf("Name offset: %d\n", name_offset);
+
     /* Allocate memory for thread description */
     rtos->thread_details = malloc(sizeof(struct thread_detail) * thread_count);
 
@@ -241,23 +255,8 @@ static int riot_update_threads(struct rtos *rtos)
                                                         strlen(state_str) + 1);
         strcpy(rtos->thread_details[tasks_found].extra_info_str, state_str);
 
-
-        uint8_t name_offset = 0;
-        retval = target_read_buffer(rtos->target,
-                                    rtos->symbols[RIOT_NAME_OFFSET].address,
-                                    sizeof(name_offset),
-                                    (uint8_t *)&name_offset);
-        if (retval != ERROR_OK) {
-            LOG_ERROR("Couldn't read `_tcb_name_offset`");
-            return retval;
-        }
-
-        printf("Name offset: %d\n", name_offset);
-
-
         /* Thread names are only available if */
         if(name_offset != 0) {
-
 
             uint32_t name_pointer = 0;
             retval = target_read_buffer(rtos->target,
@@ -358,8 +357,12 @@ static int riot_get_symbol_list_to_lookup(symbol_table_elem_t *symbol_list[])
 	*symbol_list = calloc(
 			ARRAY_SIZE(riot_symbol_list), sizeof(symbol_table_elem_t));
 
-	for (i = 0; i < ARRAY_SIZE(riot_symbol_list); i++)
+	for (i = 0; i < ARRAY_SIZE(riot_symbol_list); i++) {
 		(*symbol_list)[i].symbol_name = riot_symbol_list[i];
+		if(i == RIOT_NAME_OFFSET) {
+		    (*symbol_list)[i].optional = true;
+		}
+	}
 
 	return 0;
 }
