@@ -209,15 +209,18 @@ static int riot_update_threads(struct rtos *rtos)
     }
 
     /* Read base address of thread array */
-    uint32_t threads_base = 0;
-    retval = target_read_buffer(rtos->target,
-                                rtos->symbols[RIOT_THREADS_BASE].address,
-                                sizeof(threads_base),
-                                (uint8_t *)&threads_base);
-    if (retval != ERROR_OK) {
-        LOG_ERROR("Couldn't read `sched_threads`");
-        return retval;
-    }
+    uint32_t threads_base = rtos->symbols[RIOT_THREADS_BASE].address;
+//    retval = target_read_buffer(rtos->target,
+//                                rtos->symbols[RIOT_THREADS_BASE].address,
+//                                sizeof(threads_base),
+//                                (uint8_t *)&threads_base);
+//    if (retval != ERROR_OK) {
+//        LOG_ERROR("Couldn't read `sched_threads`");
+//        return retval;
+//    }
+
+//    printf("reading from address")
+    printf("threads_base = 0x%08x\n", threads_base);
 
     /* Allocate memory for thread description */
     rtos->thread_details = malloc(sizeof(struct thread_detail) * thread_count);
@@ -273,6 +276,15 @@ static int riot_update_threads(struct rtos *rtos)
         rtos->thread_details[tasks_found].thread_name_str = malloc(strlen("No Name")+1);
         strcpy(rtos->thread_details[tasks_found].thread_name_str, "No Name");
 
+        rtos->thread_details[tasks_found].exists = true;
+        rtos->thread_details[tasks_found].display_str = NULL;
+
+        printf("thread id:      %d\n", i);
+        printf("thread name  at %p\n", rtos->thread_details[tasks_found].thread_name_str);
+        printf("thread state at %p\n", rtos->thread_details[tasks_found].extra_info_str);
+
+        printf("thread name  = '%s'\n", rtos->thread_details[tasks_found].thread_name_str);
+        printf("thread state = '%s'\n", rtos->thread_details[tasks_found].extra_info_str);
         tasks_found++;
     }
 
@@ -310,6 +322,8 @@ static int riot_get_thread_reg_list(struct rtos *rtos, int64_t thread_id, char *
                        tcb_pointer + param->thread_sp_offset,
                        sizeof(stackptr),
                        (uint8_t *)&stackptr);
+
+    printf("stack pointer for thread %li at 0x%04x\n", thread_id, stackptr);
 
     return rtos_generic_stack_read(rtos->target,
         param->stacking_info,
@@ -351,6 +365,8 @@ static int riot_create(struct target *target)
 		LOG_ERROR("Could not find target in riot compatibility list");
 		return -1;
 	}
+
+	LOG_INFO("Found RIOT, yay!");
 
 	target->rtos->rtos_specific_params = (void *) &riot_params_list[i];
 	target->rtos->current_thread = 0;

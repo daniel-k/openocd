@@ -509,7 +509,7 @@ int rtos_generic_stack_read(struct target *target,
 		}
 	}
 	free(stack_data);
-/*	LOG_OUTPUT("Output register string: %s\r\n", *hex_reg_list); */
+	LOG_OUTPUT("Output register string: %s\r\n", *hex_reg_list);
 	return ERROR_OK;
 }
 
