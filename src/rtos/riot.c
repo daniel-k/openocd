@@ -27,31 +27,43 @@
 #include "rtos.h"
 #include "helper/log.h"
 #include "helper/types.h"
-#include "rtos_ecos_stackings.h"
+#include "rtos_riot_stackings.h"
 
-static int eCos_detect_rtos(struct target *target);
-static int eCos_create(struct target *target);
-static int eCos_update_threads(struct rtos *rtos);
-static int eCos_get_thread_reg_list(struct rtos *rtos, int64_t thread_id, char **hex_reg_list);
-static int eCos_get_symbol_list_to_lookup(symbol_table_elem_t *symbol_list[]);
+static int riot_detect_rtos(struct target *target);
+static int riot_create(struct target *target);
+static int riot_update_threads(struct rtos *rtos);
+static int riot_get_thread_reg_list(struct rtos *rtos, int64_t thread_id, char **hex_reg_list);
+static int riot_get_symbol_list_to_lookup(symbol_table_elem_t *symbol_list[]);
 
-struct eCos_thread_state {
+
+struct riot_thread_state {
 	int value;
 	const char *desc;
 };
 
-static const struct eCos_thread_state eCos_thread_states[] = {
-	{ 0, "Ready" },
+/* refer tcb.h */
+static const struct riot_thread_state riot_thread_states[] = {
+	{ 0, "Stopped" },
 	{ 1, "Sleeping" },
-	{ 2, "Countsleep" },
-	{ 4, "Suspended" },
-	{ 8, "Creating" },
-	{ 16, "Exited" }
+	{ 2, "Mutex blocked" },
+	{ 3, "Receive blocked" },
+	{ 4, "Send blocked" },
+	{ 5, "Replay blocked" },
+	{ 6, "Running" },
+	{ 7, "Pending" },
 };
 
-#define ECOS_NUM_STATES (sizeof(eCos_thread_states)/sizeof(struct eCos_thread_state))
+#define RIOT_NUM_STATES (sizeof(riot_thread_states)/sizeof(struct riot_thread_state))
 
-struct eCos_params {
+/* One entry for each architecture RIOT supports via openOCD.
+ *
+ * Note: RIOT uses different stack layout for Cortex M0 compared to Cortex M3/4
+ *
+ * Todo: Add a second entry for M3/4 and determine how to distinguish them
+ *       because openOCD doesn't seem to distinguish between them
+ *       (see target_name)
+ */
+struct riot_params {
 	const char *target_name;
 	unsigned char pointer_width;
 	unsigned char thread_stack_offset;
@@ -62,49 +74,53 @@ struct eCos_params {
 	const struct rtos_register_stacking *stacking_info;
 };
 
-static const struct eCos_params eCos_params_list[] = {
+static const struct riot_params riot_params_list[] = {
 	{
-	"cortex_m",			/* target_name */
+	"cortex_m",             /* target_name */
 	4,						/* pointer_width; */
 	0x0c,					/* thread_stack_offset; */
 	0x9c,					/* thread_name_offset; */
 	0x3c,					/* thread_state_offset; */
 	0xa0,					/* thread_next_offset */
 	0x4c,					/* thread_uniqueid_offset */
-	&rtos_eCos_Cortex_M3_stacking	/* stacking_info */
+	&rtos_riot_Cortex_M0_stacking	/* stacking_info */
 	}
 };
 
-#define ECOS_NUM_PARAMS ((int)(sizeof(eCos_params_list)/sizeof(struct eCos_params)))
+#define RIOT_NUM_PARAMS ((int)(sizeof(riot_params_list)/sizeof(struct riot_params)))
 
-enum eCos_symbol_values {
-	eCos_VAL_thread_list = 0,
-	eCos_VAL_current_thread_ptr = 1
+
+enum riot_symbol_values {
+	RIOT_THREADS = 0,
+	RIOT_NUM_THREADS = 1,
+	RIOT_ACTIVE_THREAD = 2,
 };
 
-static const char * const eCos_symbol_list[] = {
-	"Cyg_Thread::thread_list",
-	"Cyg_Scheduler_Base::current_thread",
+/* refer sched.c */
+static const char * const riot_symbol_list[] = {
+	"sched_threads",
+	"sched_num_threads",
+	"sched_active_thread"
 	NULL
 };
 
-const struct rtos_type eCos_rtos = {
-	.name = "eCos",
+const struct rtos_type riot_rtos = {
+	.name = "riot",
 
-	.detect_rtos = eCos_detect_rtos,
-	.create = eCos_create,
-	.update_threads = eCos_update_threads,
-	.get_thread_reg_list = eCos_get_thread_reg_list,
-	.get_symbol_list_to_lookup = eCos_get_symbol_list_to_lookup,
+	.detect_rtos = riot_detect_rtos,
+	.create = riot_create,
+	.update_threads = riot_update_threads,
+	.get_thread_reg_list = riot_get_thread_reg_list,
+	.get_symbol_list_to_lookup = riot_get_symbol_list_to_lookup,
 
 };
 
-static int eCos_update_threads(struct rtos *rtos)
+static int riot_update_threads(struct rtos *rtos)
 {
 	int retval;
 	int tasks_found = 0;
 	int thread_list_size = 0;
-	const struct eCos_params *param;
+	const struct riot_params *param;
 
 	if (rtos == NULL)
 		return -1;
@@ -112,7 +128,7 @@ static int eCos_update_threads(struct rtos *rtos)
 	if (rtos->rtos_specific_params == NULL)
 		return -3;
 
-	param = (const struct eCos_params *) rtos->rtos_specific_params;
+	param = (const struct riot_params *) rtos->rtos_specific_params;
 
 	if (rtos->symbols == NULL) {
 		LOG_ERROR("No symbols for eCos");
@@ -251,15 +267,15 @@ static int eCos_update_threads(struct rtos *rtos)
 			return retval;
 		}
 
-		for (i = 0; (i < ECOS_NUM_STATES) && (eCos_thread_states[i].value != thread_status); i++) {
+		for (i = 0; (i < RIOT_NUM_STATES) && (riot_thread_states[i].value != thread_status); i++) {
 			/*
 			 * empty
 			 */
 		}
 
 		const char *state_desc;
-		if  (i < ECOS_NUM_STATES)
-			state_desc = eCos_thread_states[i].desc;
+		if  (i < RIOT_NUM_STATES)
+			state_desc = riot_thread_states[i].desc;
 		else
 			state_desc = "Unknown state";
 
@@ -290,10 +306,10 @@ static int eCos_update_threads(struct rtos *rtos)
 	return 0;
 }
 
-static int eCos_get_thread_reg_list(struct rtos *rtos, int64_t thread_id, char **hex_reg_list)
+static int riot_get_thread_reg_list(struct rtos *rtos, int64_t thread_id, char **hex_reg_list)
 {
 	int retval;
-	const struct eCos_params *param;
+	const struct riot_params *param;
 
 	*hex_reg_list = NULL;
 
@@ -306,7 +322,7 @@ static int eCos_get_thread_reg_list(struct rtos *rtos, int64_t thread_id, char *
 	if (rtos->rtos_specific_params == NULL)
 		return -3;
 
-	param = (const struct eCos_params *) rtos->rtos_specific_params;
+	param = (const struct riot_params *) rtos->rtos_specific_params;
 
 	/* Find the thread with that thread id */
 	uint16_t id = 0;
@@ -356,41 +372,42 @@ static int eCos_get_thread_reg_list(struct rtos *rtos, int64_t thread_id, char *
 	return -1;
 }
 
-static int eCos_get_symbol_list_to_lookup(symbol_table_elem_t *symbol_list[])
+static int riot_get_symbol_list_to_lookup(symbol_table_elem_t *symbol_list[])
 {
 	unsigned int i;
 	*symbol_list = calloc(
-			ARRAY_SIZE(eCos_symbol_list), sizeof(symbol_table_elem_t));
+			ARRAY_SIZE(riot_symbol_list), sizeof(symbol_table_elem_t));
 
-	for (i = 0; i < ARRAY_SIZE(eCos_symbol_list); i++)
-		(*symbol_list)[i].symbol_name = eCos_symbol_list[i];
+	for (i = 0; i < ARRAY_SIZE(riot_symbol_list); i++)
+		(*symbol_list)[i].symbol_name = riot_symbol_list[i];
 
 	return 0;
 }
 
-static int eCos_detect_rtos(struct target *target)
+static int riot_detect_rtos(struct target *target)
 {
 	if ((target->rtos->symbols != NULL) &&
-			(target->rtos->symbols[eCos_VAL_thread_list].address != 0)) {
-		/* looks like eCos */
+			(target->rtos->symbols[RIOT_THREADS].address != 0)) {
+		/* looks like riot */
 		return 1;
 	}
 	return 0;
 }
 
-static int eCos_create(struct target *target)
+static int riot_create(struct target *target)
 {
 	int i = 0;
-	while ((i < ECOS_NUM_PARAMS) &&
-		(0 != strcmp(eCos_params_list[i].target_name, target->type->name))) {
+	/* lookup if target is supported by riot */
+	while ((i < RIOT_NUM_PARAMS) &&
+		(0 != strcmp(riot_params_list[i].target_name, target->type->name))) {
 		i++;
 	}
-	if (i >= ECOS_NUM_PARAMS) {
-		LOG_ERROR("Could not find target in eCos compatibility list");
+	if (i >= RIOT_NUM_PARAMS) {
+		LOG_ERROR("Could not find target in riot compatibility list");
 		return -1;
 	}
 
-	target->rtos->rtos_specific_params = (void *) &eCos_params_list[i];
+	target->rtos->rtos_specific_params = (void *) &riot_params_list[i];
 	target->rtos->current_thread = 0;
 	target->rtos->thread_details = NULL;
 	return 0;

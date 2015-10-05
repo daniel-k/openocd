@@ -16,8 +16,8 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.           *
  ***************************************************************************/
 
-#ifndef INCLUDED_RTOS_STANDARD_STACKINGS_H_
-#define INCLUDED_RTOS_STANDARD_STACKINGS_H_
+#ifndef INCLUDED_RTOS_RIOT_STACKINGS_H_
+#define INCLUDED_RTOS_RIOT_STACKINGS_H_
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -25,6 +25,6 @@
 
 #include "rtos.h"
 
-extern const struct rtos_register_stacking rtos_eCos_Cortex_M3_stacking;
+extern const struct rtos_register_stacking rtos_riot_Cortex_M0_stacking;
 
-#endif	/* ifndef INCLUDED_RTOS_STANDARD_STACKINGS_H_ */
+#endif	/* ifndef INCLUDED_RTOS_RIOT_STACKINGS_H_ */
