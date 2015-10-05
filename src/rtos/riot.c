@@ -65,24 +65,18 @@ static const struct riot_thread_state riot_thread_states[] = {
  */
 struct riot_params {
 	const char *target_name;
-	unsigned char pointer_width;
-	unsigned char thread_stack_offset;
+	unsigned char thread_sp_offset;
+	unsigned char thread_status_offset;
 	unsigned char thread_name_offset;
-	unsigned char thread_state_offset;
-	unsigned char thread_next_offset;
-	unsigned char thread_uniqueid_offset;
 	const struct rtos_register_stacking *stacking_info;
 };
 
 static const struct riot_params riot_params_list[] = {
 	{
 	"cortex_m",             /* target_name */
-	4,						/* pointer_width; */
-	0x0c,					/* thread_stack_offset; */
-	0x9c,					/* thread_name_offset; */
-	0x3c,					/* thread_state_offset; */
-	0xa0,					/* thread_next_offset */
-	0x4c,					/* thread_uniqueid_offset */
+	0x00,					/* thread_sp_offset; */
+	0x04,					/* thread_status_offset; */
+	0x30,					/* thread_name_offset; */
 	&rtos_riot_Cortex_M0_stacking	/* stacking_info */
 	}
 };
@@ -91,16 +85,24 @@ static const struct riot_params riot_params_list[] = {
 
 
 enum riot_symbol_values {
-	RIOT_THREADS = 0,
+	RIOT_THREADS_BASE = 0,
 	RIOT_NUM_THREADS = 1,
 	RIOT_ACTIVE_THREAD = 2,
+	RIOT_ACTIVE_PID = 3,
+	RIOT_WITH_DEVELHELP = 4,
+	RIOT_MAX_THREADS = 5,
+	RIOT_TCB_SIZE = 6,
 };
 
 /* refer sched.c */
 static const char * const riot_symbol_list[] = {
 	"sched_threads",
 	"sched_num_threads",
-	"sched_active_thread"
+	"sched_active_thread",
+	"sched_active_pid",
+	"_with_develhelp",
+	"_max_threads",
+	"_tcb_size",
 	NULL
 };
 
@@ -115,11 +117,12 @@ const struct rtos_type riot_rtos = {
 
 };
 
+
+
 static int riot_update_threads(struct rtos *rtos)
 {
 	int retval;
 	int tasks_found = 0;
-	int thread_list_size = 0;
 	const struct riot_params *param;
 
 	if (rtos == NULL)
@@ -131,184 +134,154 @@ static int riot_update_threads(struct rtos *rtos)
 	param = (const struct riot_params *) rtos->rtos_specific_params;
 
 	if (rtos->symbols == NULL) {
-		LOG_ERROR("No symbols for eCos");
+		LOG_ERROR("No symbols for riot");
 		return -4;
 	}
 
-	if (rtos->symbols[eCos_VAL_thread_list].address == 0) {
-		LOG_ERROR("Don't have the thread list head");
+	if (rtos->symbols[RIOT_THREADS_BASE].address == 0) {
+		LOG_ERROR("Don't have the thread list");
 		return -2;
 	}
 
 	/* wipe out previous thread details if any */
 	rtos_free_threadlist(rtos);
 
-	/* determine the number of current threads */
-	uint32_t thread_list_head = rtos->symbols[eCos_VAL_thread_list].address;
-	uint32_t thread_index;
-	target_read_buffer(rtos->target,
-		thread_list_head,
-		param->pointer_width,
-		(uint8_t *) &thread_index);
-	uint32_t first_thread = thread_index;
-	do {
-		thread_list_size++;
-		retval = target_read_buffer(rtos->target,
-				thread_index + param->thread_next_offset,
-				param->pointer_width,
-				(uint8_t *) &thread_index);
-		if (retval != ERROR_OK)
-			return retval;
-	} while (thread_index != first_thread);
+	/* Reset values */
+	rtos->current_thread = 0;   /* undefined PID in RIOT is 0 */
+	rtos->thread_count = 0;
+	rtos->thread_details = NULL;
 
 	/* read the current thread id */
-	uint32_t current_thread_addr;
+	int16_t active_pid = 0;
 	retval = target_read_buffer(rtos->target,
-			rtos->symbols[eCos_VAL_current_thread_ptr].address,
-			4,
-			(uint8_t *)&current_thread_addr);
-	if (retval != ERROR_OK)
-		return retval;
-	rtos->current_thread = 0;
-	retval = target_read_buffer(rtos->target,
-			current_thread_addr + param->thread_uniqueid_offset,
-			2,
-			(uint8_t *)&rtos->current_thread);
+                                rtos->symbols[RIOT_ACTIVE_PID].address,
+                                sizeof(active_pid),
+                                (uint8_t *)&active_pid);
 	if (retval != ERROR_OK) {
-		LOG_ERROR("Could not read eCos current thread from target");
-		return retval;
+	    LOG_ERROR("Couldn't read `sched_active_pid`");
+	    return retval;
 	}
+	rtos->current_thread = active_pid;
 
-	if ((thread_list_size  == 0) || (rtos->current_thread == 0)) {
-		/* Either : No RTOS threads - there is always at least the current execution though */
-		/* OR     : No current thread - all threads suspended - show the current execution
-		 * of idling */
-		char tmp_str[] = "Current Execution";
-		thread_list_size++;
-		tasks_found++;
-		rtos->thread_details = malloc(
-				sizeof(struct thread_detail) * thread_list_size);
-		rtos->thread_details->threadid = 1;
-		rtos->thread_details->exists = true;
-		rtos->thread_details->display_str = NULL;
-		rtos->thread_details->extra_info_str = NULL;
-		rtos->thread_details->thread_name_str = malloc(sizeof(tmp_str));
-		strcpy(rtos->thread_details->thread_name_str, tmp_str);
+    /* read the current thread count */
+    int32_t thread_count = 0; /* `int` in RIOT, but this is Cortex M* only anyway */
+    retval = target_read_buffer(rtos->target,
+                                rtos->symbols[RIOT_NUM_THREADS].address,
+                                sizeof(thread_count),
+                                (uint8_t *)&thread_count);
+    if (retval != ERROR_OK) {
+        LOG_ERROR("Couldn't read `sched_num_threads`");
+        return retval;
+    }
+    rtos->thread_count = thread_count;
 
-		if (thread_list_size == 0) {
-			rtos->thread_count = 1;
-			return ERROR_OK;
-		}
-	} else {
-		/* create space for new thread details */
-		rtos->thread_details = malloc(
-				sizeof(struct thread_detail) * thread_list_size);
-	}
+    /* read the maximum number of threads */
+    uint8_t max_threads = 0;
+    retval = target_read_buffer(rtos->target,
+                                rtos->symbols[RIOT_MAX_THREADS].address,
+                                sizeof(max_threads),
+                                (uint8_t *)&max_threads);
+    if (retval != ERROR_OK) {
+        LOG_ERROR("Couldn't read `_max_threads`");
+        return retval;
+    }
 
-	/* loop over all threads */
-	thread_index = first_thread;
-	do {
+    /* check if RIOT was compiled with DEVELHELP */
+    uint8_t with_develhelp = 0;
+    retval = target_read_buffer(rtos->target,
+                                rtos->symbols[RIOT_WITH_DEVELHELP].address,
+                                sizeof(with_develhelp),
+                                (uint8_t *)&with_develhelp);
+    if (retval != ERROR_OK) {
+        LOG_ERROR("Couldn't read `_with_develhelp`");
+        return retval;
+    }
 
-		#define ECOS_THREAD_NAME_STR_SIZE (200)
-		char tmp_str[ECOS_THREAD_NAME_STR_SIZE];
-		unsigned int i = 0;
-		uint32_t name_ptr = 0;
-		uint32_t prev_thread_ptr;
+    /* get size of thread structure */
+    uint8_t tcb_size = 0;
+    retval = target_read_buffer(rtos->target,
+                                rtos->symbols[RIOT_TCB_SIZE].address,
+                                sizeof(tcb_size),
+                                (uint8_t *)&tcb_size);
+    if (retval != ERROR_OK) {
+        LOG_ERROR("Couldn't read `_tcb_size`");
+        return retval;
+    }
 
-		/* Save the thread pointer */
-		uint16_t thread_id;
-		retval = target_read_buffer(rtos->target,
-				thread_index + param->thread_uniqueid_offset,
-				2,
-				(uint8_t *)&thread_id);
-		if (retval != ERROR_OK) {
-			LOG_ERROR("Could not read eCos thread id from target");
-			return retval;
-		}
-		rtos->thread_details[tasks_found].threadid = thread_id;
+    /* Read base address of thread array */
+    uint32_t threads_base = 0;
+    retval = target_read_buffer(rtos->target,
+                                rtos->symbols[RIOT_THREADS_BASE].address,
+                                sizeof(threads_base),
+                                (uint8_t *)&threads_base);
+    if (retval != ERROR_OK) {
+        LOG_ERROR("Couldn't read `sched_threads`");
+        return retval;
+    }
 
-		/* read the name pointer */
-		retval = target_read_buffer(rtos->target,
-				thread_index + param->thread_name_offset,
-				param->pointer_width,
-				(uint8_t *)&name_ptr);
-		if (retval != ERROR_OK) {
-			LOG_ERROR("Could not read eCos thread name pointer from target");
-			return retval;
-		}
+    /* Allocate memory for thread description */
+    rtos->thread_details = malloc(sizeof(struct thread_detail) * thread_count);
 
-		/* Read the thread name */
-		retval =
-			target_read_buffer(rtos->target,
-				name_ptr,
-				ECOS_THREAD_NAME_STR_SIZE,
-				(uint8_t *)&tmp_str);
-		if (retval != ERROR_OK) {
-			LOG_ERROR("Error reading thread name from eCos target");
-			return retval;
-		}
-		tmp_str[ECOS_THREAD_NAME_STR_SIZE-1] = '\x00';
+    /* Buffer for thread names */
+//    char buffer[32];
 
-		if (tmp_str[0] == '\x00')
-			strcpy(tmp_str, "No Name");
+    uint32_t tcb_pointer = 0;
 
-		rtos->thread_details[tasks_found].thread_name_str =
-			malloc(strlen(tmp_str)+1);
-		strcpy(rtos->thread_details[tasks_found].thread_name_str, tmp_str);
+    for(int i = 0; i < max_threads; i++) {
 
-		/* Read the thread status */
-		int64_t thread_status = 0;
-		retval = target_read_buffer(rtos->target,
-				thread_index + param->thread_state_offset,
-				4,
-				(uint8_t *)&thread_status);
-		if (retval != ERROR_OK) {
-			LOG_ERROR("Error reading thread state from eCos target");
-			return retval;
-		}
+        /* get pointer to tcb_t */
+        retval = target_read_buffer(rtos->target,
+                                    threads_base + (i * 4),
+                                    sizeof(tcb_pointer),
+                                    (uint8_t *)&tcb_pointer);
+        if (retval != ERROR_OK) {
+            LOG_ERROR("Couldn't read `sched_threads[i]`");
+            return retval;
+        }
 
-		for (i = 0; (i < RIOT_NUM_STATES) && (riot_thread_states[i].value != thread_status); i++) {
-			/*
-			 * empty
-			 */
-		}
+        if(tcb_pointer == 0) {
+            /* PID unused */
+            continue;
+        }
 
-		const char *state_desc;
-		if  (i < RIOT_NUM_STATES)
-			state_desc = riot_thread_states[i].desc;
-		else
-			state_desc = "Unknown state";
+        /* Index is PID */
+        rtos->thread_details[tasks_found].threadid = i;
 
-		rtos->thread_details[tasks_found].extra_info_str = malloc(strlen(
-					state_desc)+1);
-		strcpy(rtos->thread_details[tasks_found].extra_info_str, state_desc);
+        /* get pointer to tcb_t */
+        uint16_t status = 0;
+        retval = target_read_buffer(rtos->target,
+                                    tcb_pointer + param->thread_status_offset,
+                                    sizeof(status),
+                                    (uint8_t *)&status);
+        if (retval != ERROR_OK) {
+            LOG_ERROR("Couldn't read `sched_threads[i].status`");
+            return retval;
+        }
 
-		rtos->thread_details[tasks_found].exists = true;
+        unsigned int k;
+        for(k = 0; k < RIOT_NUM_STATES; k++) {
+            if(riot_thread_states[k].value == status) {
+                break;
+            }
+        }
 
-		rtos->thread_details[tasks_found].display_str = NULL;
+        const char* state_str = (k == RIOT_NUM_STATES) ? "unknown" :riot_thread_states[k].desc;
 
-		tasks_found++;
-		prev_thread_ptr = thread_index;
+        rtos->thread_details[tasks_found].extra_info_str = malloc(strlen(state_str));
+        strcpy(rtos->thread_details[tasks_found].extra_info_str, state_str);
 
-		/* Get the location of the next thread structure. */
-		thread_index = rtos->symbols[eCos_VAL_thread_list].address;
-		retval = target_read_buffer(rtos->target,
-				prev_thread_ptr + param->thread_next_offset,
-				param->pointer_width,
-				(uint8_t *) &thread_index);
-		if (retval != ERROR_OK) {
-			LOG_ERROR("Error reading next thread pointer in eCos thread list");
-			return retval;
-		}
-	} while (thread_index != first_thread);
+        rtos->thread_details[tasks_found].thread_name_str = malloc(strlen("No Name")+1);
+        strcpy(rtos->thread_details[tasks_found].thread_name_str, "No Name");
 
-	rtos->thread_count = tasks_found;
+        tasks_found++;
+    }
+
 	return 0;
 }
 
 static int riot_get_thread_reg_list(struct rtos *rtos, int64_t thread_id, char **hex_reg_list)
 {
-	int retval;
+//	int retval;
 	const struct riot_params *param;
 
 	*hex_reg_list = NULL;
@@ -325,51 +298,23 @@ static int riot_get_thread_reg_list(struct rtos *rtos, int64_t thread_id, char *
 	param = (const struct riot_params *) rtos->rtos_specific_params;
 
 	/* Find the thread with that thread id */
-	uint16_t id = 0;
-	uint32_t thread_list_head = rtos->symbols[eCos_VAL_thread_list].address;
-	uint32_t thread_index;
-	target_read_buffer(rtos->target, thread_list_head, param->pointer_width,
-			(uint8_t *)&thread_index);
-	bool done = false;
-	while (!done) {
-		retval = target_read_buffer(rtos->target,
-				thread_index + param->thread_uniqueid_offset,
-				2,
-				(uint8_t *)&id);
-		if (retval != ERROR_OK) {
-			LOG_ERROR("Error reading unique id from eCos thread");
-			return retval;
-		}
+	uint32_t threads_base = rtos->symbols[RIOT_THREADS_BASE].address;
+	uint32_t tcb_pointer = 0;
+	target_read_buffer(rtos->target,
+	                   threads_base + (thread_id * 4),
+	                   sizeof(tcb_pointer),
+	                   (uint8_t *)&tcb_pointer);
 
-		if (id == thread_id) {
-			done = true;
-			break;
-		}
-		target_read_buffer(rtos->target,
-			thread_index + param->thread_next_offset,
-			param->pointer_width,
-			(uint8_t *) &thread_index);
-	}
+	uint32_t stackptr = 0;
+    target_read_buffer(rtos->target,
+                       tcb_pointer + param->thread_sp_offset,
+                       sizeof(stackptr),
+                       (uint8_t *)&stackptr);
 
-	if (done) {
-		/* Read the stack pointer */
-		int64_t stack_ptr = 0;
-		retval = target_read_buffer(rtos->target,
-				thread_index + param->thread_stack_offset,
-				param->pointer_width,
-				(uint8_t *)&stack_ptr);
-		if (retval != ERROR_OK) {
-			LOG_ERROR("Error reading stack frame from eCos thread");
-			return retval;
-		}
-
-		return rtos_generic_stack_read(rtos->target,
-			param->stacking_info,
-			stack_ptr,
-			hex_reg_list);
-	}
-
-	return -1;
+    return rtos_generic_stack_read(rtos->target,
+        param->stacking_info,
+        stackptr,
+        hex_reg_list);
 }
 
 static int riot_get_symbol_list_to_lookup(symbol_table_elem_t *symbol_list[])
@@ -387,7 +332,7 @@ static int riot_get_symbol_list_to_lookup(symbol_table_elem_t *symbol_list[])
 static int riot_detect_rtos(struct target *target)
 {
 	if ((target->rtos->symbols != NULL) &&
-			(target->rtos->symbols[RIOT_THREADS].address != 0)) {
+			(target->rtos->symbols[RIOT_THREADS_BASE].address != 0)) {
 		/* looks like riot */
 		return 1;
 	}
