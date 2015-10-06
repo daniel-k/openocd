@@ -56,19 +56,10 @@ static const struct riot_thread_state riot_thread_states[] = {
 
 #define RIOT_NUM_STATES (sizeof(riot_thread_states)/sizeof(struct riot_thread_state))
 
-/* One entry for each architecture RIOT supports via openOCD.
- *
- * Note: RIOT uses different stack layout for Cortex M0 compared to Cortex M3/4
- *
- * Todo: Add a second entry for M3/4 and determine how to distinguish them
- *       because openOCD doesn't seem to distinguish between them
- *       (see target_name)
- */
 struct riot_params {
 	const char *target_name;
 	unsigned char thread_sp_offset;
 	unsigned char thread_status_offset;
-	unsigned char thread_name_offset;
 };
 
 /* Initialize in riot_create() depending on architecture */
@@ -79,8 +70,12 @@ static const struct riot_params riot_params_list[] = {
 	"cortex_m",             /* target_name */
 	0x00,					/* thread_sp_offset; */
 	0x04,					/* thread_status_offset; */
-	0x30,					/* thread_name_offset; */
-	}
+	},
+    { /* STLink */
+    "hla_target",           /* target_name */
+    0x00,                   /* thread_sp_offset; */
+    0x04,                   /* thread_status_offset; */
+    }
 };
 
 #define RIOT_NUM_PARAMS ((int)(sizeof(riot_params_list)/sizeof(struct riot_params)))
@@ -380,6 +375,7 @@ static int riot_detect_rtos(struct target *target)
 static int riot_create(struct target *target)
 {
 	int i = 0;
+	printf("Target type name is: '%s'\n", target->type->name);
 	/* lookup if target is supported by RIOT */
 	while ((i < RIOT_NUM_PARAMS) &&
 		(0 != strcmp(riot_params_list[i].target_name, target->type->name))) {
