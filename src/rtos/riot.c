@@ -1,4 +1,6 @@
 /***************************************************************************
+ *   Copyright (C) 2015 by Daniel Krebs                                    *
+ *   Daniel Krebs - github@daniel-krebs.net                                *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -46,14 +48,13 @@ struct riot_thread_state {
 static const struct riot_thread_state riot_thread_states[] = {
 	{ 0, "Stopped" },
 	{ 1, "Sleeping" },
-	{ 2, "Mutex blocked" },
-	{ 3, "Receive blocked" },
-	{ 4, "Send blocked" },
-	{ 5, "Replay blocked" },
+	{ 2, "Blocked mutex" },
+	{ 3, "Blocked receive" },
+	{ 4, "Blocked send" },
+	{ 5, "Blocked reply" },
 	{ 6, "Running" },
 	{ 7, "Pending" },
 };
-
 #define RIOT_NUM_STATES (sizeof(riot_thread_states)/sizeof(struct riot_thread_state))
 
 struct riot_params {
@@ -62,24 +63,22 @@ struct riot_params {
 	unsigned char thread_status_offset;
 };
 
-/* Initialize in riot_create() depending on architecture */
-static const struct rtos_register_stacking *stacking_info;
-
 static const struct riot_params riot_params_list[] = {
 	{
 	"cortex_m",             /* target_name */
-	0x00,					/* thread_sp_offset; */
-	0x04,					/* thread_status_offset; */
+	0x00,					/* thread_sp_offset */
+	0x04,					/* thread_status_offset */
 	},
     { /* STLink */
     "hla_target",           /* target_name */
-    0x00,                   /* thread_sp_offset; */
-    0x04,                   /* thread_status_offset; */
+    0x00,                   /* thread_sp_offset */
+    0x04,                   /* thread_status_offset */
     }
 };
-
 #define RIOT_NUM_PARAMS ((int)(sizeof(riot_params_list)/sizeof(struct riot_params)))
 
+/* Initialize in riot_create() depending on architecture */
+static const struct rtos_register_stacking *stacking_info;
 
 enum riot_symbol_values {
 	RIOT_THREADS_BASE = 0,
@@ -89,7 +88,7 @@ enum riot_symbol_values {
 	RIOT_NAME_OFFSET,
 };
 
-/* refer sched.c */
+/* refer core/sched.c */
 static const char * const riot_symbol_list[] = {
 	"sched_threads",
 	"sched_num_threads",
@@ -99,8 +98,13 @@ static const char * const riot_symbol_list[] = {
 	NULL
 };
 
+/* Define which symbols are not mandatory */
+const enum riot_symbol_values riot_optional_symbols[] = {
+        RIOT_NAME_OFFSET,
+};
+
 const struct rtos_type riot_rtos = {
-	.name = "riot",
+	.name = "RIOT",
 
 	.detect_rtos = riot_detect_rtos,
 	.create = riot_create,
@@ -109,8 +113,6 @@ const struct rtos_type riot_rtos = {
 	.get_symbol_list_to_lookup = riot_get_symbol_list_to_lookup,
 
 };
-
-
 
 static int riot_update_threads(struct rtos *rtos)
 {
@@ -127,12 +129,12 @@ static int riot_update_threads(struct rtos *rtos)
 	param = (const struct riot_params *) rtos->rtos_specific_params;
 
 	if (rtos->symbols == NULL) {
-		LOG_ERROR("No symbols for riot");
+		LOG_ERROR("No symbols for RIOT");
 		return -4;
 	}
 
 	if (rtos->symbols[RIOT_THREADS_BASE].address == 0) {
-		LOG_ERROR("Don't have the thread base");
+		LOG_ERROR("Can't find symbol `sched_threads`");
 		return -2;
 	}
 
@@ -140,7 +142,7 @@ static int riot_update_threads(struct rtos *rtos)
 	rtos_free_threadlist(rtos);
 
 	/* Reset values */
-	rtos->current_thread = 0;   /* undefined PID in RIOT is 0 */
+	rtos->current_thread = 0;
 	rtos->thread_count = 0;
 
 	/* read the current thread id */
@@ -150,19 +152,20 @@ static int riot_update_threads(struct rtos *rtos)
                                 sizeof(active_pid),
                                 (uint8_t *)&active_pid);
 	if (retval != ERROR_OK) {
-	    LOG_ERROR("Couldn't read `sched_active_pid`");
+	    LOG_ERROR("Can't read symbol `sched_active_pid`");
 	    return retval;
 	}
 	rtos->current_thread = active_pid;
 
     /* read the current thread count */
-    int32_t thread_count = 0; /* `int` in RIOT, but this is Cortex M* only anyway */
+	/* It's `int` in RIOT, but this is Cortex M* only anyway */
+    int32_t thread_count = 0;
     retval = target_read_buffer(rtos->target,
                                 rtos->symbols[RIOT_NUM_THREADS].address,
                                 sizeof(thread_count),
                                 (uint8_t *)&thread_count);
     if (retval != ERROR_OK) {
-        LOG_ERROR("Couldn't read `sched_num_threads`");
+        LOG_ERROR("Can't read symbol `sched_num_threads`");
         return retval;
     }
     rtos->thread_count = thread_count;
@@ -174,14 +177,15 @@ static int riot_update_threads(struct rtos *rtos)
                                 sizeof(max_threads),
                                 (uint8_t *)&max_threads);
     if (retval != ERROR_OK) {
-        LOG_ERROR("Couldn't read `_max_threads`");
+        LOG_ERROR("Can't read symbol `_max_threads`");
         return retval;
     }
 
     /* Base address of thread array */
     uint32_t threads_base = rtos->symbols[RIOT_THREADS_BASE].address;
-    printf("threads_base = 0x%08x\n", threads_base);
 
+    /* Try to get the offset of tcb_t::name, if absent RIOT wasn't compiled with
+     * DEVELHELP, so there are no thread names */
     uint8_t name_offset = 0;
     if(rtos->symbols[RIOT_NAME_OFFSET].address != 0) {
         retval = target_read_buffer(rtos->target,
@@ -189,30 +193,27 @@ static int riot_update_threads(struct rtos *rtos)
                                     sizeof(name_offset),
                                     (uint8_t *)&name_offset);
         if (retval != ERROR_OK) {
-            LOG_ERROR("Couldn't read `_tcb_name_offset`");
+            LOG_ERROR("Can't read symbol `_tcb_name_offset`");
             return retval;
         }
     }
 
-    printf("Name offset: %d\n", name_offset);
-
     /* Allocate memory for thread description */
     rtos->thread_details = malloc(sizeof(struct thread_detail) * thread_count);
 
-    /* Buffer for thread names */
+    /* Buffer for thread names, maximum to display is 32 */
     char buffer[32];
-
-    uint32_t tcb_pointer = 0;
 
     for(int i = 0; i < max_threads; i++) {
 
         /* get pointer to tcb_t */
+        uint32_t tcb_pointer = 0;
         retval = target_read_buffer(rtos->target,
                                     threads_base + (i * 4),
                                     sizeof(tcb_pointer),
                                     (uint8_t *)&tcb_pointer);
         if (retval != ERROR_OK) {
-            LOG_ERROR("Couldn't read `sched_threads[i]`");
+            LOG_ERROR("Can't parse `sched_threads`");
             return retval;
         }
 
@@ -231,7 +232,7 @@ static int riot_update_threads(struct rtos *rtos)
                                     sizeof(status),
                                     (uint8_t *)&status);
         if (retval != ERROR_OK) {
-            LOG_ERROR("Couldn't read `sched_threads[i].status`");
+            LOG_ERROR("Can't parse `sched_threads`");
             return retval;
         }
 
@@ -250,16 +251,15 @@ static int riot_update_threads(struct rtos *rtos)
                                                         strlen(state_str) + 1);
         strcpy(rtos->thread_details[tasks_found].extra_info_str, state_str);
 
-        /* Thread names are only available if */
+        /* Thread names are only available if compiled with DEVELHELP */
         if(name_offset != 0) {
-
             uint32_t name_pointer = 0;
             retval = target_read_buffer(rtos->target,
                                         tcb_pointer + name_offset,
                                         sizeof(name_pointer),
                                         (uint8_t *)&name_pointer);
             if (retval != ERROR_OK) {
-                LOG_ERROR("Couldn't read name pointer");
+                LOG_ERROR("Can't parse `sched_threads`");
                 return retval;
             }
 
@@ -269,14 +269,15 @@ static int riot_update_threads(struct rtos *rtos)
                                         sizeof(buffer),
                                         (uint8_t *)&buffer);
             if (retval != ERROR_OK) {
-                LOG_ERROR("Couldn't read name");
+                LOG_ERROR("Can't parse `sched_threads`");
                 return retval;
             }
 
-            if(buffer[sizeof(buffer)-1] != 0) {
+            /* Make sure the string in the buffer terminates */
+            if(buffer[sizeof(buffer)-1] != 0)
                 buffer[sizeof(buffer)-1] = 0;
-            }
 
+            /* Copy thread name */
             rtos->thread_details[tasks_found].thread_name_str = malloc(
                                                             strlen(buffer) + 1);
             strcpy(rtos->thread_details[tasks_found].thread_name_str, buffer);
@@ -288,18 +289,9 @@ static int riot_update_threads(struct rtos *rtos)
             strcpy(rtos->thread_details[tasks_found].thread_name_str, no_name);
         }
 
-
-
-
         rtos->thread_details[tasks_found].exists = true;
         rtos->thread_details[tasks_found].display_str = NULL;
 
-        printf("thread id:      %d\n", i);
-        printf("thread name  at %p\n", rtos->thread_details[tasks_found].thread_name_str);
-        printf("thread state at %p\n", rtos->thread_details[tasks_found].extra_info_str);
-
-        printf("thread name  = '%s'\n", rtos->thread_details[tasks_found].thread_name_str);
-        printf("thread state = '%s'\n", rtos->thread_details[tasks_found].extra_info_str);
         tasks_found++;
     }
 
@@ -308,7 +300,7 @@ static int riot_update_threads(struct rtos *rtos)
 
 static int riot_get_thread_reg_list(struct rtos *rtos, int64_t thread_id, char **hex_reg_list)
 {
-//	int retval;
+    int retval;
 	const struct riot_params *param;
 
 	*hex_reg_list = NULL;
@@ -324,21 +316,28 @@ static int riot_get_thread_reg_list(struct rtos *rtos, int64_t thread_id, char *
 
 	param = (const struct riot_params *) rtos->rtos_specific_params;
 
-	/* Find the thread with that thread id */
+	/* find the thread with given thread id */
 	uint32_t threads_base = rtos->symbols[RIOT_THREADS_BASE].address;
 	uint32_t tcb_pointer = 0;
-	target_read_buffer(rtos->target,
-	                   threads_base + (thread_id * 4),
-	                   sizeof(tcb_pointer),
-	                   (uint8_t *)&tcb_pointer);
+	retval = target_read_buffer(rtos->target,
+                                threads_base + (thread_id * 4),
+                                sizeof(tcb_pointer),
+                                (uint8_t *)&tcb_pointer);
+    if (retval != ERROR_OK) {
+        LOG_ERROR("Can't parse `sched_threads`");
+        return retval;
+    }
 
+    /* read stack pointer for that thread */
 	uint32_t stackptr = 0;
-    target_read_buffer(rtos->target,
-                       tcb_pointer + param->thread_sp_offset,
-                       sizeof(stackptr),
-                       (uint8_t *)&stackptr);
-
-    printf("stack pointer for thread %li at 0x%04x\n", thread_id, stackptr);
+	retval = target_read_buffer(rtos->target,
+                                tcb_pointer + param->thread_sp_offset,
+                                sizeof(stackptr),
+                                (uint8_t *)&stackptr);
+    if (retval != ERROR_OK) {
+        LOG_ERROR("Can't parse `sched_threads`");
+        return retval;
+    }
 
     return rtos_generic_stack_read(rtos->target,
         stacking_info,
@@ -354,8 +353,14 @@ static int riot_get_symbol_list_to_lookup(symbol_table_elem_t *symbol_list[])
 
 	for (i = 0; i < ARRAY_SIZE(riot_symbol_list); i++) {
 		(*symbol_list)[i].symbol_name = riot_symbol_list[i];
-		if(i == RIOT_NAME_OFFSET) {
-		    (*symbol_list)[i].optional = true;
+		(*symbol_list)[i].optional = false;
+
+		/* Lookup if symbol is optional */
+		for(unsigned k = 0; k < sizeof(riot_optional_symbols); k++) {
+		    if(i == riot_optional_symbols[k]) {
+		        (*symbol_list)[i].optional = true;
+		        break;
+		    }
 		}
 	}
 
@@ -375,14 +380,14 @@ static int riot_detect_rtos(struct target *target)
 static int riot_create(struct target *target)
 {
 	int i = 0;
-	printf("Target type name is: '%s'\n", target->type->name);
+
 	/* lookup if target is supported by RIOT */
 	while ((i < RIOT_NUM_PARAMS) &&
 		(0 != strcmp(riot_params_list[i].target_name, target->type->name))) {
 		i++;
 	}
 	if (i >= RIOT_NUM_PARAMS) {
-		LOG_ERROR("Could not find target in riot compatibility list");
+		LOG_ERROR("Could not find target in RIOT compatibility list");
 		return -1;
 	}
 
