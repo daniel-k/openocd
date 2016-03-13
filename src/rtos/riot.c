@@ -229,7 +229,7 @@ static int riot_update_threads(struct rtos *rtos)
 		rtos->thread_details[tasks_found].threadid = i;
 
 		/* read thread state */
-		uint16_t status = 0;
+		uint8_t status = 0;
 		retval = target_read_buffer(rtos->target,
 									tcb_pointer + param->thread_status_offset,
 									sizeof(status),
