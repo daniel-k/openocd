@@ -630,10 +630,8 @@ static int armv8_dpm_full_context(struct target *target)
 			if (r->mode != mode)
 				continue;
 
-			/* CPSR was read, so "R16" must mean SPSR */
 			retval = dpmv8_read_reg(dpm,
-					&cache->reg_list[i],
-					(r->num == 16) ? 17 : r->num);
+					&cache->reg_list[i], r->num);
 			if (retval != ERROR_OK)
 				goto done;
 		}
