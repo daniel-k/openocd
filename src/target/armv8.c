@@ -944,7 +944,7 @@ struct reg_cache *armv8_build_reg_cache(struct target *target)
 
 		reg_list[i].name = armv8_regs[i].name;
 		reg_list[i].size = armv8_regs[i].bits;
-		reg_list[i].value = calloc(1, 4);
+		reg_list[i].value = calloc(1, 8);
 		reg_list[i].dirty = 0;
 		reg_list[i].valid = 0;
 		reg_list[i].type = &armv8_reg_type;
