@@ -211,30 +211,33 @@ int dpmv8_modeswitch(struct arm_dpm *dpm, enum arm_mode mode)
 /* just read the register -- rely on the core mode being right */
 static int dpmv8_read_reg(struct arm_dpm *dpm, struct reg *r, unsigned regnum)
 {
-	uint32_t value;
-	uint64_t value_64;
+	union {
+		uint64_t u64;
+		uint32_t u32;
+	} value;
 	int retval = ERROR_FAIL;
 
 	switch (regnum) {
 		case 0 ... 30:
 			retval = dpm->instr_read_data_dcc_64(dpm,
 				ARMV8_MSR_GP(SYSTEM_DBG_DBGDTR_EL0, regnum),
-				&value_64);
+				&value.u64);
 			break;
-		case 31:
+	        case 31: /* SP */
 			retval = dpm->instr_read_data_r0_64(dpm,
 				ARMV8_MOVFSP_64(0),
-				&value_64);
+				&value.u64);
 			break;
-		case 32:
+		case 32: /* PC */
 			retval = dpm->instr_read_data_r0_64(dpm,
 				ARMV8_MRS_DLR(0),
-				&value_64);
+				&value.u64);
 			break;
-		case 33:
+		case 33: /* CPSR */
 			retval = dpm->instr_read_data_r0(dpm,
 				ARMV8_MRS_DSPSR(0),
-				&value);
+				&value.u32);
+			break;
 		default:
 			LOG_DEBUG("READ: %s fail", r->name);
 			break;
@@ -243,11 +246,14 @@ static int dpmv8_read_reg(struct arm_dpm *dpm, struct reg *r, unsigned regnum)
 	if (retval == ERROR_OK) {
 		r->valid = true;
 		r->dirty = false;
-		buf_set_u64(r->value, 0, 32, value_64);
-		if (r->size == 64)
-			LOG_DEBUG("READ: %s, %16.8llx", r->name, (unsigned long long) value_64);
-		else
-			LOG_DEBUG("READ: %s, %8.8x", r->name, (unsigned) value);
+		if (r->size == 64) {
+			buf_set_u64(r->value, 0, 64, value.u64);
+			LOG_DEBUG("READ: %s, %16.16" PRIx64, r->name,
+				  value.u64);
+		} else {
+			buf_set_u32(r->value, 0, 32, value.u32);
+			LOG_DEBUG("READ: %s, %8.8" PRIx32, r->name, value.u32);
+		}
 	}
 	return retval;
 }
