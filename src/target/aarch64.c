@@ -2923,9 +2923,9 @@ static const struct command_registration aarch64_command_handlers[] = {
 		.chain = armv8_command_handlers,
 	},
 	{
-		.name = "cortex_a",
+		.name = "aarch64",
 		.mode = COMMAND_ANY,
-		.help = "Cortex-A command group",
+		.help = "aarch64 command group",
 		.usage = "",
 		.chain = aarch64_exec_command_handlers,
 	},
