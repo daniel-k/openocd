@@ -847,7 +847,7 @@ void armv8_dpm_report_wfar(struct arm_dpm *dpm, uint64_t addr)
 			/* ?? */
 			break;
 		default:
-			LOG_DEBUG("Unknow core_state");
+			LOG_DEBUG("Unknown core_state");
 			break;
 	}
 	dpm->wp_pc = addr;

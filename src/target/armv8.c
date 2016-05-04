@@ -312,7 +312,7 @@ static int armv8_read_ttbcr(struct target *target)
 	if (retval != ERROR_OK)
 		goto done;
 
-	/* claaer ttrr1_used and ttbr0_mask */
+	/* clear ttrr1_used and ttbr0_mask */
 	memset(&armv8->armv8_mmu.ttbr1_used, 0, sizeof(armv8->armv8_mmu.ttbr1_used));
 	memset(&armv8->armv8_mmu.ttbr0_mask, 0, sizeof(armv8->armv8_mmu.ttbr0_mask));
 
