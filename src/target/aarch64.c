@@ -2819,6 +2819,17 @@ COMMAND_HANDLER(aarch64_handle_dbginit_command)
 
 	return aarch64_init_debug_access(target);
 }
+
+COMMAND_HANDLER(aarch64_handle_mmu_info_command)
+{
+	struct target *target = get_current_target(CMD_CTX);
+	int ret_value;
+
+	ret_value = armv8_arch_state(target);
+
+	return ret_value;
+}
+
 COMMAND_HANDLER(aarch64_handle_smp_off_command)
 {
 	struct target *target = get_current_target(CMD_CTX);
@@ -2890,6 +2901,13 @@ static const struct command_registration aarch64_exec_command_handlers[] = {
 		.handler = aarch64_handle_dbginit_command,
 		.mode = COMMAND_EXEC,
 		.help = "Initialize core debug",
+		.usage = "",
+	},
+	{
+		.name = "mmu_info",
+		.handler = aarch64_handle_mmu_info_command,
+		.mode = COMMAND_EXEC,
+		.help = "MMU and cache summary",
 		.usage = "",
 	},
 	{   .name = "smp_off",
