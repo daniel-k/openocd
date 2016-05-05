@@ -160,11 +160,17 @@ void armv8_dpm_report_wfar(struct arm_dpm *, uint64_t wfar);
 /* DSCR bits; see ARMv7a arch spec section C10.3.1.
  * Not all v7 bits are valid in v6.
  */
+#define DSCR_CORE_HALTED			(0x1 <<  0)
+#define DSCR_CORE_RESTARTED			(0x1 <<  1)
+
 #define DSCR_DEBUG_STATUS_MASK		(0x1F <<  0)
 #define DSCR_ERR					(0x1 <<  6)
+#define DSCR_STICKY_ABORT_PRECISE	(0x1 <<  6)
 #define DSCR_SYS_ERROR_PEND			(0x1 <<  7)
+#define DSCR_STICKY_ABORT_IMPRECISE	(0x1 <<  7)
 #define DSCR_CUR_EL					(0x3 <<  8)
 #define DSCR_EL_STATUS_MASK			(0xF << 10)
+#define DSCR_ITR_EN					(0x1 << 13)
 #define DSCR_HDE					(0x1 << 14)
 #define DSCR_SDD					(0x1 << 16)
 #define DSCR_NON_SECURE             (0x1 << 18)
@@ -172,6 +178,7 @@ void armv8_dpm_report_wfar(struct arm_dpm *, uint64_t wfar);
 #define DSCR_TDA					(0x1 << 21)
 #define DSCR_INTDIS_MASK			(0x3 << 22)
 #define DSCR_ITE					(0x1 << 24)
+#define DSCR_INSTR_COMP				(0x1 << 24)
 #define DSCR_PIPE_ADVANCE           (0x1 << 25)
 #define DSCR_TXU					(0x1 << 26)
 #define DSCR_RTO					(0x1 << 27) /* bit 28 is reserved */
@@ -212,12 +219,14 @@ void armv8_dpm_report_wfar(struct arm_dpm *, uint64_t wfar);
 #define DSCR_EXT_DCC_NON_BLOCKING     (0x0 << 20)
 #define DSCR_EXT_DCC_STALL_MODE       (0x1 << 20)
 #define DSCR_EXT_DCC_FAST_MODE        (0x2 << 20)  /* bits 22, 23 are reserved */
+#define DSCR_EXT_DCC_MASK             (0x3 << 20) /* DTR mode */  /* bits 22, 23 are reserved */
 
 
 /* DRCR (debug run control register) bits */
 #define DRCR_HALT				(1 << 0)
 #define DRCR_RESTART			(1 << 1)
 #define DRCR_CLEAR_EXCEPTIONS	(1 << 2)
+#define DRCR_CLEAR_SPA			(1 << 3)
 
 /* PRCR (processor debug status register) bits */
 #define PRSR_PU					(1 << 0)
