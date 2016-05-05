@@ -90,7 +90,7 @@ static int aarch64_restore_system_control_reg(struct target *target)
 					return retval;
 			break;
 			default:
-				LOG_DEBUG("unknow cpu state 0x%x" PRIx32, armv8->arm.core_state);
+				LOG_DEBUG("unknown cpu state 0x%x" PRIx32, armv8->arm.core_state);
 			}
 	}
 	return retval;
@@ -115,7 +115,7 @@ static int aarch64_mmu_modify(struct target *target, int enable)
 	if (enable) {
 		/*	if mmu enabled at target stop and mmu not enable */
 		if (!(aarch64->system_control_reg & 0x1U)) {
-			LOG_ERROR("trying to enable mmu on target stopped with mmu disable");
+			LOG_ERROR("trying to enable mmu on stopped target with mmu disabled");
 			return ERROR_FAIL;
 		}
 		if (!(aarch64->system_control_reg_curr & 0x1U)) {
@@ -150,7 +150,7 @@ static int aarch64_mmu_modify(struct target *target, int enable)
 						return retval;
 				break;
 				default:
-					LOG_DEBUG("unknow cpu state 0x%x" PRIx32, armv8->arm.core_state);
+					LOG_DEBUG("unknown cpu state 0x%x" PRIx32, armv8->arm.core_state);
 			}
 		}
 	} else {
@@ -193,7 +193,7 @@ static int aarch64_mmu_modify(struct target *target, int enable)
 						return retval;
 					break;
 				default:
-					LOG_DEBUG("unknow cpu state 0x%x" PRIx32, armv8->arm.core_state);
+					LOG_DEBUG("unknown cpu state 0x%x" PRIx32, armv8->arm.core_state);
 					break;
 			}
 		}
@@ -339,7 +339,7 @@ static int aarch64_write_dcc(struct aarch64_common *a8, uint32_t data)
 static int aarch64_write_dcc_64(struct aarch64_common *a8, uint64_t data)
 {
 	int ret;
-	LOG_DEBUG("write DCC Low word0x%08" PRIx32, (unsigned)data);
+	LOG_DEBUG("write DCC Low word  0x%08" PRIx32, (unsigned)data);
 	LOG_DEBUG("write DCC High word 0x%08" PRIx32, (unsigned)(data >> 32));
 	ret = mem_ap_sel_write_u32(a8->armv8_common.arm.dap,
 		a8->armv8_common.debug_ap, a8->armv8_common.debug_base + CPUV8_DBG_DTRRX, data);
@@ -898,7 +898,7 @@ static int aarch64_halt(struct target *target)
 	struct armv8_common *armv8 = target_to_armv8(target);
 	struct adiv5_dap *swjdp = armv8->arm.dap;
 
-	/* enable CTI*/
+	/* enable CTI */
 	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
 			armv8->cti_base + CTI_CTR, 1);
 	if (retval != ERROR_OK)
@@ -1251,7 +1251,7 @@ static int aarch64_post_debug_entry(struct target *target)
 				return retval;
 		break;
 		default:
-			LOG_DEBUG("unknow cpu state 0x%x" PRIx32, armv8->arm.core_state);
+			LOG_DEBUG("unknown cpu state 0x%x" PRIx32, armv8->arm.core_state);
 	}
 	LOG_DEBUG("System_register: %8.8" PRIx32, aarch64->system_control_reg);
 	aarch64->system_control_reg_curr = aarch64->system_control_reg;
@@ -1288,7 +1288,8 @@ static int aarch64_step(struct target *target, int current, uint32_t address,
 		return retval;
 
 	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUV8_DBG_EDECR, (tmp|0x4));
+										 armv8->debug_base + CPUV8_DBG_EDECR,
+										 (tmp | EDECR_SS_HALTING_STEP_ENABLE));
 	if (retval != ERROR_OK)
 		return retval;
 
@@ -1308,8 +1309,9 @@ static int aarch64_step(struct target *target, int current, uint32_t address,
 	}
 
 	target->debug_reason = DBG_REASON_BREAKPOINT;
-	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x24, (tmp&(~0x4)));
+	retval = mem_ap_sel_write_atomic_u32(
+		swjdp, armv8->debug_ap, armv8->debug_base + CPUV8_DBG_EDECR,
+		(tmp & (~EDECR_SS_HALTING_STEP_ENABLE)));
 	if (retval != ERROR_OK)
 		return retval;
 
@@ -1812,7 +1814,7 @@ static int aarch64_write_apb_ab_memory(struct target *target,
 	uint32_t dscr;
 	uint8_t *tmp_buff = NULL;
 
-	LOG_DEBUG("Writing APB-AP memory address 0x%" PRIx32 " size %"	PRIu32 " count%"  PRIu32,
+	LOG_DEBUG("Writing APB-AP memory address 0x%" PRIx32 " size %"	PRIu32 " count %"  PRIu32,
 			  address, size, count);
 	if (target->state != TARGET_HALTED) {
 		LOG_WARNING("target not halted");
@@ -2069,7 +2071,7 @@ static int aarch64_read_apb_ab_memory(struct target *target,
 	uint8_t *tmp_buff = NULL;
 	uint8_t *u8buf_ptr;
 
-	LOG_DEBUG("Reading APB-AP memory address 0x%" PRIx64 " size %"	PRIu32 " count%"  PRIu32,
+	LOG_DEBUG("Reading APB-AP memory address 0x%" PRIx64 " size %"	PRIu32 " count %"  PRIu32,
 			  address, size, count);
 	if (target->state != TARGET_HALTED) {
 		LOG_WARNING("target not halted");
@@ -2819,6 +2821,17 @@ COMMAND_HANDLER(aarch64_handle_dbginit_command)
 
 	return aarch64_init_debug_access(target);
 }
+
+COMMAND_HANDLER(aarch64_handle_mmu_info_command)
+{
+	struct target *target = get_current_target(CMD_CTX);
+	int ret_value;
+
+	ret_value = armv8_arch_state(target);
+
+	return ret_value;
+}
+
 COMMAND_HANDLER(aarch64_handle_smp_off_command)
 {
 	struct target *target = get_current_target(CMD_CTX);
@@ -2892,6 +2905,13 @@ static const struct command_registration aarch64_exec_command_handlers[] = {
 		.help = "Initialize core debug",
 		.usage = "",
 	},
+	{
+		.name = "mmu_info",
+		.handler = aarch64_handle_mmu_info_command,
+		.mode = COMMAND_EXEC,
+		.help = "MMU and cache summary",
+		.usage = "",
+	},
 	{   .name = "smp_off",
 	    .handler = aarch64_handle_smp_off_command,
 	    .mode = COMMAND_EXEC,
@@ -2923,9 +2943,9 @@ static const struct command_registration aarch64_command_handlers[] = {
 		.chain = armv8_command_handlers,
 	},
 	{
-		.name = "cortex_a",
+		.name = "aarch64",
 		.mode = COMMAND_ANY,
-		.help = "Cortex-A command group",
+		.help = "aarch64 command group",
 		.usage = "",
 		.chain = aarch64_exec_command_handlers,
 	},

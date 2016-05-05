@@ -312,7 +312,7 @@ static int armv8_read_ttbcr(struct target *target)
 	if (retval != ERROR_OK)
 		goto done;
 
-	/* claaer ttrr1_used and ttbr0_mask */
+	/* clear ttrr1_used and ttbr0_mask */
 	memset(&armv8->armv8_mmu.ttbr1_used, 0, sizeof(armv8->armv8_mmu.ttbr1_used));
 	memset(&armv8->armv8_mmu.ttbr0_mask, 0, sizeof(armv8->armv8_mmu.ttbr0_mask));
 
@@ -944,7 +944,7 @@ struct reg_cache *armv8_build_reg_cache(struct target *target)
 
 		reg_list[i].name = armv8_regs[i].name;
 		reg_list[i].size = armv8_regs[i].bits;
-		reg_list[i].value = calloc(1, 4);
+		reg_list[i].value = calloc(1, 8);
 		reg_list[i].dirty = 0;
 		reg_list[i].valid = 0;
 		reg_list[i].type = &armv8_reg_type;
