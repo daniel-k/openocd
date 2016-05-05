@@ -205,6 +205,8 @@ void armv8_dpm_report_wfar(struct arm_dpm *, uint64_t wfar);
 #define DRCR_CSPA				(1 << 3)
 #define DRCR_CBRRQ				(1 << 4)
 
+/* EDECR value */
+# define EDECR_SS_HALTING_STEP_ENABLE (1 << 2)
 
 /* DTR modes */
 #define DSCR_EXT_DCC_NON_BLOCKING     (0x0 << 20)

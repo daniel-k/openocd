@@ -1288,7 +1288,8 @@ static int aarch64_step(struct target *target, int current, uint32_t address,
 		return retval;
 
 	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + CPUV8_DBG_EDECR, (tmp|0x4));
+										 armv8->debug_base + CPUV8_DBG_EDECR,
+										 (tmp | EDECR_SS_HALTING_STEP_ENABLE));
 	if (retval != ERROR_OK)
 		return retval;
 
@@ -1308,8 +1309,9 @@ static int aarch64_step(struct target *target, int current, uint32_t address,
 	}
 
 	target->debug_reason = DBG_REASON_BREAKPOINT;
-	retval = mem_ap_sel_write_atomic_u32(swjdp, armv8->debug_ap,
-			armv8->debug_base + 0x24, (tmp&(~0x4)));
+	retval = mem_ap_sel_write_atomic_u32(
+		swjdp, armv8->debug_ap, armv8->debug_base + CPUV8_DBG_EDECR,
+		(tmp & (~EDECR_SS_HALTING_STEP_ENABLE)));
 	if (retval != ERROR_OK)
 		return retval;
 
